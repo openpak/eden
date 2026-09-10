@@ -921,7 +921,9 @@ struct Values {
     SwitchableSetting<bool> airplane_mode{linkage, false, "airplane_mode", Category::Network};
 
     // OpenPak: resolve Nintendo's online hosts to the OpenPak server instead of Nintendo's.
-    Setting<bool> enable_openpak{linkage, false, "enable_openpak", Category::Network};
+    // This build is the OpenPak client -- on by default, no setup step for the user. The knob
+    // stays so a dev can point a session somewhere else, or turn it off to test against stock.
+    Setting<bool> enable_openpak{linkage, true, "enable_openpak", Category::Network};
     Setting<std::string> openpak_server_ip{linkage, "145.241.199.19", "openpak_server_ip",
                                            Category::Network};
     // ponytail: empty means "same box as the server"; split it only if NAT checks ever move.

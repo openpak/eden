@@ -94,12 +94,13 @@ And everyone who continues or had contributed to the project! <3
 This fork resolves a title's Nintendo online hostnames to the OpenPak server instead of
 Nintendo's, so a game reaches OpenPak with no patch to the game or the firmware.
 
-Turn it on in `config.ini` under `[Network]` (or with the matching env vars, for frontends
-that don't surface the setting):
+It is on by default -- this build is the OpenPak client, so there is nothing for a player to
+configure. The knobs exist for development only, in `config.ini` under `[Network]` or as env
+vars:
 
 | Setting | Env | Default |
 |---|---|---|
-| `enable_openpak` | `OPENPAK_ENABLE` | `false` |
+| `enable_openpak` | `OPENPAK_ENABLE` | `true` |
 | `openpak_server_ip` | `OPENPAK_SERVER_IP` | `145.241.199.19` |
 | `openpak_nat_ip` | `OPENPAK_NAT_IP` | empty — same address as the server |
 
