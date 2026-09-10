@@ -25,7 +25,7 @@ jobs:
 
       # Pinned in src/android/app/build.gradle.kts; runners don't ship it.
       - name: Install NDK
-        run: sdkmanager --install "ndk;28.2.13676358"
+        run: "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \"ndk;28.2.13676358\""
 
       - name: Build
         run: ./.ci/android/build.sh -t standard -b Release
