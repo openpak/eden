@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright 2026 OpenPak
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: Build Eden (Android)
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  android:
+    name: arm64 APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Pinned in src/android/app/build.gradle.kts; runners don't ship it.
+      - name: Install NDK
+        run: sdkmanager --install "ndk;28.2.13676358"
+
+      - name: Build
+        run: ./.ci/android/build.sh -t standard -b Release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eden-openpak-android
+          path: artifacts/*
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: gh release create "${GITHUB_REF_NAME}" artifacts/* --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -88,3 +88,19 @@ Super special thanks to Cloudflare for preventing the git server from blowing up
 - Ryubing
 
 And everyone who continues or had contributed to the project! <3
+
+## OpenPak
+
+This fork resolves a title's Nintendo online hostnames to the OpenPak server instead of
+Nintendo's, so a game reaches OpenPak with no patch to the game or the firmware.
+
+Turn it on in `config.ini` under `[Network]` (or with the matching env vars, for frontends
+that don't surface the setting):
+
+| Setting | Env | Default |
+|---|---|---|
+| `enable_openpak` | `OPENPAK_ENABLE` | `false` |
+| `openpak_server_ip` | `OPENPAK_SERVER_IP` | `145.241.199.19` |
+| `openpak_nat_ip` | `OPENPAK_NAT_IP` | empty — same address as the server |
+
+`upstream` tracks eden-emu/eden; OpenPak work lives on `main`.

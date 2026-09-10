@@ -13,6 +13,7 @@
 
 #include "common/fs/file.h"
 #include "common/hex_util.h"
+#include "common/settings.h"
 #include "common/string_util.h"
 
 #include "core/hle/service/ssl/ssl_backend.h"
@@ -172,7 +173,9 @@ public:
     }
 
     void SetVerifyOption(u32 option) override {
-        skip_cert_verification = (option == 0);
+        // [OpenPak] A redirected host answers with our own certificate, not one chaining to the
+        // CA the title pinned, so verification can never pass while OpenPak is on.
+        skip_cert_verification = (option == 0) || Settings::values.enable_openpak.GetValue();
         LOG_WARNING(Service_SSL, "option={} skip_verification={}", option,
                     skip_cert_verification);
         if (skip_cert_verification) {

@@ -920,6 +920,13 @@ struct Values {
                                            Category::Network};
     SwitchableSetting<bool> airplane_mode{linkage, false, "airplane_mode", Category::Network};
 
+    // OpenPak: resolve Nintendo's online hosts to the OpenPak server instead of Nintendo's.
+    Setting<bool> enable_openpak{linkage, false, "enable_openpak", Category::Network};
+    Setting<std::string> openpak_server_ip{linkage, "145.241.199.19", "openpak_server_ip",
+                                           Category::Network};
+    // ponytail: empty means "same box as the server"; split it only if NAT checks ever move.
+    Setting<std::string> openpak_nat_ip{linkage, "", "openpak_nat_ip", Category::Network};
+
     // WebService
     Setting<std::string> web_api_url{linkage, "api.ynet-fun.xyz", "web_api_url",
                                      Category::WebService};

@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <string_view>
+
 #include "core/hle/service/service.h"
 
 namespace Core {
@@ -13,6 +15,10 @@ class System;
 }
 
 namespace Service::Sockets {
+
+// [OpenPak] Which hostnames the OpenPak redirect claims. Exposed for the unit test.
+bool IsNintendoHost(std::string_view host);
+bool IsNatCheckHost(std::string_view host);
 
 class SFDNSRES final : public ServiceFramework<SFDNSRES> {
 public:

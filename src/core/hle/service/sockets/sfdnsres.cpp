@@ -4,10 +4,13 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <optional>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "common/settings.h"
 #include "common/string_util.h"
 #include "common/swap.h"
 #include "core/core.h"
@@ -100,6 +103,66 @@ static bool IsBlockedHost(const std::string& host) {
     return std::any_of(
         blockedDomains.begin(), blockedDomains.end(),
         [&host](const std::string& domain) { return host.find(domain) != std::string::npos; });
+}
+
+// [OpenPak] A title's own online hostnames are answered with the OpenPak server's address, so
+// the guest talks to us without any patch to the game or the firmware. Off unless enabled; the
+// env vars exist because frontends that never surface the setting (SDL, CI, a test rig) still
+// need a way in.
+static bool OpenPakActive() {
+    if (Settings::values.enable_openpak.GetValue()) {
+        return true;
+    }
+    const char* env = std::getenv("OPENPAK_ENABLE");
+    if (env == nullptr || *env == '\0') {
+        return false;
+    }
+    const std::string value = Common::ToLower(env);
+    return value != "0" && value != "false" && value != "no" && value != "off";
+}
+
+static std::string ConfiguredIp(const std::string& setting, const char* env_var) {
+    if (!setting.empty()) {
+        return setting;
+    }
+    if (const char* env = std::getenv(env_var); env != nullptr && *env != '\0') {
+        return env;
+    }
+    return {};
+}
+
+bool IsNintendoHost(std::string_view host) {
+    static constexpr std::string_view domains[] = {"nintendo.net", "nintendo.com",
+                                                   "nintendowifi.net", "nintendo.co.jp"};
+    return std::any_of(std::begin(domains), std::end(domains), [host](std::string_view domain) {
+        return host == domain ||
+               (host.size() > domain.size() && host.ends_with(domain) &&
+                host[host.size() - domain.size() - 1] == '.');
+    });
+}
+
+bool IsNatCheckHost(std::string_view host) {
+    return host.starts_with("nncs2-") && host.ends_with(".n.n.srv.nintendo.net");
+}
+
+static std::optional<std::string> GetOpenPakRedirectIp(std::string_view host) {
+    if (!OpenPakActive()) {
+        return std::nullopt;
+    }
+    const std::string server_ip =
+        ConfiguredIp(Settings::values.openpak_server_ip.GetValue(), "OPENPAK_SERVER_IP");
+    if (server_ip.empty()) {
+        return std::nullopt;
+    }
+    if (IsNatCheckHost(host)) {
+        const std::string nat_ip =
+            ConfiguredIp(Settings::values.openpak_nat_ip.GetValue(), "OPENPAK_NAT_IP");
+        return nat_ip.empty() ? server_ip : nat_ip;
+    }
+    if (IsNintendoHost(host)) {
+        return server_ip;
+    }
+    return std::nullopt;
 }
 
 static NetDbError GetAddrInfoErrorToNetDbError(GetAddrInfoError result) {
@@ -202,13 +265,18 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
     const std::string host = Common::StringFromBuffer(host_buffer);
     // For now, ignore options, which are in input buffer 1 for GetHostByNameRequestWithOptions.
 
-    // Prevent resolution of Nintendo servers
-    if (IsBlockedHost(host)) {
+    // [OpenPak] Redirection wins over the blocklist: these are exactly the hosts the blocklist
+    // exists to stop, and pointing them at our own server is the point.
+    std::string query_host = host;
+    if (const auto redirect = GetOpenPakRedirectIp(host); redirect.has_value()) {
+        LOG_INFO(Network, "[OpenPak] Redirecting '{}' -> '{}'", host, *redirect);
+        query_host = *redirect;
+    } else if (IsBlockedHost(host)) {
         LOG_WARNING(Network, "Resolution of hostname {} requested, returning EAI_AGAIN", host);
         return {0, GetAddrInfoError::AGAIN};
     }
 
-    auto res_v = Network::GetAddressInfo(host, /*service*/ std::nullopt);
+    auto res_v = Network::GetAddressInfo(query_host, /*service*/ std::nullopt);
     if (auto* res = std::get_if<std::vector<Network::AddrInfo>>(&res_v)) {
         const std::vector<u8> data = SerializeAddrInfoAsHostEnt(*res, host);
         const u32 data_size = u32(data.size());
@@ -318,8 +386,13 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
     const auto host_buffer = ctx.ReadBuffer(0);
     const std::string host = Common::StringFromBuffer(host_buffer);
 
-    // Prevent resolution of Nintendo servers
-    if (IsBlockedHost(host)) {
+    // [OpenPak] Redirection wins over the blocklist: these are exactly the hosts the blocklist
+    // exists to stop, and pointing them at our own server is the point.
+    std::string query_host = host;
+    if (const auto redirect = GetOpenPakRedirectIp(host); redirect.has_value()) {
+        LOG_INFO(Network, "[OpenPak] Redirecting '{}' -> '{}'", host, *redirect);
+        query_host = *redirect;
+    } else if (IsBlockedHost(host)) {
         LOG_WARNING(Network, "Resolution of hostname {} requested, returning EAI_AGAIN", host);
         return {0, GetAddrInfoError::AGAIN};
     }
@@ -332,7 +405,7 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
 
     // Serialized hints are also passed in a buffer, but are ignored for now.
 
-    auto res_v = Network::GetAddressInfo(host, service);
+    auto res_v = Network::GetAddressInfo(query_host, service);
     if (auto* res = std::get_if<std::vector<Network::AddrInfo>>(&res_v)) {
         const std::vector<u8> data = SerializeAddrInfo(*res, host);
         const u32 data_size = u32(data.size());
