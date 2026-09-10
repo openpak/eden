@@ -7,6 +7,8 @@ on:
   push:
     branches: [main]
     tags: ['openpak-v*']
+    # A CI or docs tweak doesn't need a 50-minute arm64 rebuild.
+    paths-ignore: ['.github/**', 'README.md']
   workflow_dispatch:
 
 jobs:
@@ -44,6 +46,9 @@ jobs:
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/openpak-v')
-        run: gh release create "${GITHUB_REF_NAME}" artifacts/* --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --generate-notes
+        # The release may already exist -- a tag pushed by `gh release create` lands here too.
+        run: |
+          gh release create "${GITHUB_REF_NAME}" artifacts/* --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --generate-notes \
+            || gh release upload "${GITHUB_REF_NAME}" artifacts/* --repo "${GITHUB_REPOSITORY}" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
