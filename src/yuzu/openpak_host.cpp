@@ -21,7 +21,7 @@
 #include <fmt/format.h>
 
 #include "common/fs/path_util.h"
-#include "common/logging/log.h"
+#include "common/logging.h"
 #include "openpak/account.h"
 #include "openpak/friends_cache.h"
 #include "core/core.h"
@@ -377,7 +377,7 @@ void OpenPakHost::WriteProfileAvatar(const Common::UUID& uuid, const std::string
     }
 
     const auto image_path = QString::fromStdString(Common::FS::PathToUTF8String(
-        Common::FS::GetCitronPath(Common::FS::CitronPath::NANDDir) /
+        Common::FS::GetEdenPath(Common::FS::EdenPath::NANDDir) /
         fmt::format("system/save/8000000000000010/su/avators/{}.jpg", uuid.FormattedString())));
 
     QDir{}.mkpath(QFileInfo(image_path).absolutePath());
@@ -454,7 +454,9 @@ void OpenPakHost::PollFriends() {
                 // [Nextendo] The guest's own INotificationService only ever signals once, at
                 // construction -- before this first real poll has a chance to land. Without this,
                 // a Friends viewer already on-screen never learns that real data showed up.
-                Service::Friend::NotifyFriendsListUpdated();
+                // TODO(openpak): Eden's friend service has no NotifyFriendsListUpdated hook
+                // yet (Citron added one); a Friends viewer already on-screen refreshes on its
+                // next own poll instead.
 
                 const bool suppress_toasts = first_poll;
                 first_poll = false;
