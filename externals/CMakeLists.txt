@@ -64,6 +64,9 @@ if (IOS)
 endif()
 AddJsonPackage(httplib)
 
+# OpenPak client + Qt dialogs (submodule)
+add_subdirectory(openpak-client)
+
 if (YUZU_STATIC_ROOM)
     return()
 endif()

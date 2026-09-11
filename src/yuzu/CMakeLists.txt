@@ -228,6 +228,7 @@ add_executable(yuzu
     data_widget.ui
     ryujinx_dialog.h ryujinx_dialog.cpp ryujinx_dialog.ui
     main_window.h main_window.cpp main.ui
+    openpak_host.cpp openpak_host.h
 
     configuration/system/new_user_dialog.h configuration/system/new_user_dialog.cpp configuration/system/new_user_dialog.ui
     configuration/system/profile_avatar_dialog.h configuration/system/profile_avatar_dialog.cpp
@@ -396,7 +397,7 @@ elseif(WIN32)
 endif()
 
 target_link_libraries(yuzu PRIVATE nlohmann_json::nlohmann_json)
-target_link_libraries(yuzu PRIVATE common core input_common frontend_common network video_core qt_common)
+target_link_libraries(yuzu PRIVATE common core input_common frontend_common network video_core qt_common openpak::qt)
 target_link_libraries(yuzu PRIVATE Boost::headers Qt6::Widgets Qt6::Charts Qt6::Concurrent)
 target_link_libraries(yuzu PRIVATE ${PLATFORM_LIBRARIES} Threads::Threads)
 if (ENABLE_OPENGL)

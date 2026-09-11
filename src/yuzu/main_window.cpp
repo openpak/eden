@@ -19,6 +19,10 @@
 #include "main_window.h"
 #include "network/network.h"
 #include "qt_common/discord/discord.h"
+#include "yuzu/openpak_host.h"
+#include "openpak/log.h"
+#include "openpak/platform.h"
+#include "openpak/qt/account_dialog.h"
 #include "ui_main.h"
 
 // Other Yuzu stuff //
@@ -986,6 +990,32 @@ void MainWindow::InitializeWidgets() {
 
     multiplayer_state = new MultiplayerState(this, game_list->GetModel(), ui->action_Leave_Room,
                                              ui->action_Show_Room, *QtCommon::system);
+
+    // OpenPak: the shared client and dialogs (externals/openpak-client), hosted by OpenPakHost.
+    openpak::Platform::SetDirectories(Common::FS::GetEdenPath(Common::FS::EdenPath::ConfigDir),
+                                      Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir));
+    openpak::SetLogSink([](openpak::LogLevel, const std::string& message) {
+        LOG_INFO(Frontend, "[openpak] {}", message);
+    });
+    openpak_host = new OpenPakHost(system, this, this);
+    openpak::qt::Host::SetCurrent(openpak_host);
+    connect(ui->action_OpenPak_Account, &QAction::triggered, this, [this] {
+        OpenPakAccountDialog dialog(openpak_host, this);
+        dialog.exec();
+    });
+    connect(ui->action_OpenPak_Sign_In, &QAction::triggered, this, [this] { openpak_host->SignIn(); });
+    connect(ui->action_OpenPak_Sign_Out, &QAction::triggered, this, [this] { openpak_host->SignOut(); });
+    ui->action_OpenPak_Enable_Redirection->setChecked(Settings::values.enable_openpak.GetValue());
+    connect(ui->action_OpenPak_Enable_Redirection, &QAction::toggled, this,
+            [](bool on) { Settings::values.enable_openpak.SetValue(on); });
+    connect(openpak_host, &openpak::qt::Host::StatusChanged, this,
+            [this](const QString& message) { statusBar()->showMessage(message, 5000); });
+    connect(openpak_host, &openpak::qt::Host::AccountLinked, this,
+            [this] { ui->action_OpenPak_Sign_In->setEnabled(false); ui->action_OpenPak_Sign_Out->setEnabled(true); });
+    connect(openpak_host, &openpak::qt::Host::AccountUnlinked, this,
+            [this] { ui->action_OpenPak_Sign_In->setEnabled(true); ui->action_OpenPak_Sign_Out->setEnabled(false); });
+    ui->action_OpenPak_Sign_In->setEnabled(!openpak_host->IsLinked());
+    ui->action_OpenPak_Sign_Out->setEnabled(openpak_host->IsLinked());
     multiplayer_state->setVisible(false);
 
     // Create status bar
