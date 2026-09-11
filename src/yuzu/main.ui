@@ -201,6 +201,11 @@
      <addaction name="separator"/>
      <addaction name="action_Configure_Tas"/>
     </widget>
+    <addaction name="separator"/>
+    <addaction name="action_OpenPak_Account"/>
+    <addaction name="action_OpenPak_Sign_In"/>
+    <addaction name="action_OpenPak_Sign_Out"/>
+    <addaction name="action_OpenPak_Enable_Redirection"/>
     <widget class="QMenu" name="menu_Create_Shortcuts">
      <property name="title">
       <string>&amp;Create Home Menu Shortcut</string>
@@ -300,6 +305,29 @@
    </property>
    <property name="text">
     <string>Single &amp;Window Mode</string>
+   </property>
+  </action>
+  <action name="action_OpenPak_Account">
+   <property name="text">
+    <string>&amp;OpenPak Account...</string>
+   </property>
+  </action>
+  <action name="action_OpenPak_Sign_In">
+   <property name="text">
+    <string>Sign in to OpenPak...</string>
+   </property>
+  </action>
+  <action name="action_OpenPak_Sign_Out">
+   <property name="text">
+    <string>Sign out of OpenPak</string>
+   </property>
+  </action>
+  <action name="action_OpenPak_Enable_Redirection">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Connect to OpenPak (redirect Nintendo services)</string>
    </property>
   </action>
   <action name="action_Configure">

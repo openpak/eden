@@ -50,6 +50,7 @@ class OverlayDialog;
 class ControllerDialog;
 class QLabel;
 class MultiplayerState;
+class OpenPakHost;
 class QPushButton;
 class QProgressDialog;
 class QSlider;
@@ -488,6 +489,7 @@ private:
 #endif
 
     MultiplayerState* multiplayer_state = nullptr;
+    OpenPakHost* openpak_host = nullptr;
 
     GRenderWindow* render_window = nullptr;
     GameList* game_list = nullptr;
