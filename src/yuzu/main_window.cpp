@@ -997,7 +997,7 @@ void MainWindow::InitializeWidgets() {
     openpak::SetLogSink([](openpak::LogLevel, const std::string& message) {
         LOG_INFO(Frontend, "[openpak] {}", message);
     });
-    openpak_host = new OpenPakHost(system, this, this);
+    openpak_host = new OpenPakHost(*QtCommon::system, this, this);
     openpak::qt::Host::SetCurrent(openpak_host);
     connect(ui->action_OpenPak_Account, &QAction::triggered, this, [this] {
         OpenPakAccountDialog dialog(openpak_host, this);
