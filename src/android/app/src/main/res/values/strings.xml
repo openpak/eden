@@ -1870,4 +1870,14 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
     <string name="add_folders">Add Folder</string>
     <string name="percent">%1$d%%</string>
 
+
+    <!-- OpenPak -->
+    <string name="openpak_account">OpenPak account</string>
+    <string name="openpak_account_description">Sign in so friends, invitations and online play know who you are</string>
+    <string name="openpak_email">E-mail</string>
+    <string name="openpak_password">Password</string>
+    <string name="openpak_sign_in">Sign in</string>
+    <string name="openpak_not_linked">This device is not signed in to OpenPak yet.</string>
+    <string name="openpak_no_server">OpenPak is turned off in Network settings.</string>
+    <string name="openpak_linked_as">Signed in as %1$s (%2$s)</string>
 </resources>

@@ -29,10 +29,54 @@
 #include "core/hle/service/server_manager.h"
 #include "core/loader/loader.h"
 
+#include <mutex>
+
+#include "common/settings.h"
+#include "openpak/platform.h"
+#include "openpak/session.h"
+
 namespace Service::Account {
 
 // Thumbnails are hard coded to be at least this size
 constexpr std::size_t THUMBNAIL_SIZE = 0x24000;
+
+// [OpenPak] The identity a title asks acc:u0 for.
+//
+// A stubbed id_token is 0x100 zero bytes, which a title server cannot resolve to anybody -- the
+// console says "account not recognised" and no online session ever starts. These walk OpenPak's
+// own sign-in chain instead and hand over what it issued.
+//
+// Signed in on the asking thread rather than in the background: a game that boots straight into
+// online play must not race a sign-in, and the chain answers in well under a second on a server
+// that is there. When it is not, this returns nothing and the caller keeps the old stub, which
+// is a console that is simply not online.
+static bool OpenPakSignedIn() {
+    if (!Settings::values.enable_openpak.GetValue()) {
+        return false;
+    }
+
+    static std::once_flag configured;
+    std::call_once(configured, [] {
+        // The frontend may have set these already; the values are the same either way, and the
+        // Android build has no frontend that would.
+        openpak::Platform::SetDirectories(Common::FS::GetEdenPath(Common::FS::EdenPath::ConfigDir),
+                                          Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir));
+
+        openpak::client::session::Configure(Settings::values.openpak_server_ip.GetValue(), 443, {});
+    });
+
+    return openpak::client::session::Ensure();
+}
+
+static std::vector<u8> OpenPakIdTokenBytes() {
+    if (!OpenPakSignedIn()) {
+        return {};
+    }
+
+    const std::string token = openpak::client::session::IdToken();
+
+    return {token.begin(), token.end()};
+}
 
 static std::filesystem::path GetImagePath(const Common::UUID& uuid) {
     return Common::FS::GetEdenPath(Common::FS::EdenPath::NANDDir) /
@@ -502,10 +546,16 @@ protected:
     }
 
     void LoadIdTokenCache(HLERequestContext& ctx) {
-        LOG_WARNING(Service_ACC, "(STUBBED) called");
+        std::vector<u8> token_data = OpenPakIdTokenBytes();
 
-        std::vector<u8> token_data(0x100);
-        std::fill(token_data.begin(), token_data.end(), u8(0));
+        if (token_data.empty()) {
+            LOG_WARNING(Service_ACC, "(STUBBED) called");
+
+            token_data.assign(0x100, u8(0));
+        } else {
+            LOG_INFO(Service_ACC, "[OpenPak] Handing the title an id_token ({} bytes)",
+                     token_data.size());
+        }
 
         (void)ctx.WriteBuffer(token_data);
 
@@ -715,9 +765,16 @@ private:
     void GetAccountId(HLERequestContext& ctx) {
         LOG_DEBUG(Service_ACC, "called");
 
+        // [OpenPak] The network service account id has to be the one the id_token was issued for,
+        // or a title asks a server about a player nobody has heard of. The local profile hash is
+        // what stands in when there is no OpenPak identity.
+        const u64 nsa_id = OpenPakSignedIn()
+                               ? openpak::client::session::NetworkServiceAccountId()
+                               : 0;
+
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(ResultSuccess);
-        rb.PushRaw<u64>(profile_manager->GetLastOpenedUser().Hash());
+        rb.PushRaw<u64>(nsa_id != 0 ? nsa_id : profile_manager->GetLastOpenedUser().Hash());
     }
 
     void EnsureIdTokenCacheAsync(HLERequestContext& ctx) {

@@ -82,6 +82,19 @@ class HomeSettingsFragment : Fragment() {
         val optionsList: MutableList<HomeSetting> = mutableListOf<HomeSetting>().apply {
             add(
                 HomeSetting(
+                    R.string.openpak_account,
+                    R.string.openpak_account_description,
+                    R.drawable.ic_settings,
+                    {
+                        OpenPakSignInDialogFragment().show(
+                            parentFragmentManager,
+                            OpenPakSignInDialogFragment.TAG
+                        )
+                    }
+                )
+            )
+            add(
+                HomeSetting(
                     R.string.advanced_settings,
                     R.string.settings_description,
                     R.drawable.ic_settings,

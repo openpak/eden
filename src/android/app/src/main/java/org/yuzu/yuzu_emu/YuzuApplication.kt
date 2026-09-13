@@ -23,6 +23,7 @@ import org.yuzu.yuzu_emu.utils.DirectoryInitialization
 import org.yuzu.yuzu_emu.utils.DocumentsTree
 import org.yuzu.yuzu_emu.utils.GpuDriverHelper
 import org.yuzu.yuzu_emu.utils.Log
+import org.yuzu.yuzu_emu.utils.OpenPak
 import org.yuzu.yuzu_emu.utils.PowerStateUpdater
 import org.yuzu.yuzu_emu.utils.ControllerNavigationGlobalHook
 import java.util.Locale
@@ -72,6 +73,11 @@ class YuzuApplication : Application() {
         NativeInput.reloadInputDevices()
         NativeLibrary.logDeviceInfo()
         PowerStateUpdater.start()
+
+        // Online before any screen is opened: until this runs the account is offline, invisible to
+        // friends, and hears about no invitation.
+        OpenPak.start()
+
         Log.logDeviceInfo()
         ControllerNavigationGlobalHook.install(this)
 

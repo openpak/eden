@@ -1215,6 +1215,10 @@ target_link_libraries(core PRIVATE
     RenderDoc::API
     ZLIB::ZLIB)
 
+# [OpenPak] acc:u0 hands a title the id_token OpenPak issued, which means core walks the same
+# sign-in chain the Qt frontend does. The library is the one place that chain lives.
+target_link_libraries(core PRIVATE openpak::client)
+
 target_link_libraries(core PUBLIC httplib::httplib zstd::zstd)
 
 if (ENABLE_WEB_SERVICE)
