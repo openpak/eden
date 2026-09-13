@@ -926,8 +926,13 @@ struct Values {
     Setting<bool> enable_openpak{linkage, true, "enable_openpak", Category::Network};
     Setting<std::string> openpak_server_ip{linkage, "145.241.199.19", "openpak_server_ip",
                                            Category::Network};
-    // ponytail: empty means "same box as the server"; split it only if NAT checks ever move.
-    Setting<std::string> openpak_nat_ip{linkage, "", "openpak_nat_ip", Category::Network};
+    // The NAT check needs a SECOND address, not the same one twice: a console probes nncs1 and
+    // nncs2 from one socket and compares what each of them saw, which is how it decides its NAT
+    // type. Point both at one box and the answer is meaningless -- Pia gets nothing back and a
+    // title stops with 2318-0007 before it opens a single connection. This is the peer OpenPak
+    // runs its second responder on.
+    Setting<std::string> openpak_nat_ip{linkage, "145.241.228.207", "openpak_nat_ip",
+                                        Category::Network};
 
     // WebService
     Setting<std::string> web_api_url{linkage, "api.ynet-fun.xyz", "web_api_url",

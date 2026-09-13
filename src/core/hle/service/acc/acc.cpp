@@ -32,6 +32,7 @@
 #include <mutex>
 
 #include "common/settings.h"
+#include "openpak/network_profile.h"
 #include "openpak/platform.h"
 #include "openpak/session.h"
 
@@ -63,6 +64,11 @@ static bool OpenPakSignedIn() {
                                           Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir));
 
         openpak::client::session::Configure(Settings::values.openpak_server_ip.GetValue(), 443, {});
+
+        // What the console redirects and where, from OpenPak itself. The stored copy is loaded
+        // first so a launch without network still redirects.
+        openpak::client::profile::Load();
+        void(openpak::client::profile::Refresh({}, "switch"));
     });
 
     return openpak::client::session::Ensure();
@@ -792,10 +798,20 @@ private:
     }
 
     void LoadIdTokenCache(HLERequestContext& ctx) {
-        LOG_WARNING(Service_ACC, "(STUBBED) called");
+        // [OpenPak] This is the copy a running title actually reaches (IManagerForApplication,
+        // command 4); the other one in this file serves a different interface. A title handed
+        // 0x100 zero bytes here throws where it parses them: Stardew aborts with 2162-0001
+        // before it opens a single socket.
+        std::vector<u8> token_data = OpenPakIdTokenBytes();
 
-        std::vector<u8> token_data(0x100);
-        std::fill(token_data.begin(), token_data.end(), u8(0));
+        if (token_data.empty()) {
+            LOG_WARNING(Service_ACC, "(STUBBED) called");
+
+            token_data.assign(0x100, u8(0));
+        } else {
+            LOG_INFO(Service_ACC, "[OpenPak] Handing the title an id_token ({} bytes)",
+                     token_data.size());
+        }
 
         ctx.WriteBuffer(token_data);
 

@@ -38,6 +38,12 @@ public:
     virtual void SetSocket(std::shared_ptr<Network::SocketBase> socket) = 0;
     virtual Result SetHostName(const std::string& hostname) = 0;
     virtual void SetVerifyOption(u32 option) = 0;
+    // The protocol list the title offered, in the wire format it supplied: one length byte per
+    // name. A title that asks for HTTP/2 and is never offered it waits for a preface that never
+    // comes, which is a game that hangs on "connecting" rather than one that fails.
+    virtual void SetAlpnProtos(std::span<const u8> protos) = 0;
+    // What the server picked, empty when nothing was negotiated.
+    virtual std::vector<u8> GetNegotiatedAlpnProto() = 0;
     virtual Result DoHandshake() = 0;
     virtual Result Read(size_t* out_size, std::span<u8> data) = 0;
     virtual Result Write(size_t* out_size, std::span<const u8> data) = 0;
