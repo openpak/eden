@@ -8,6 +8,8 @@
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
 #include "core/hle/service/filesystem/filesystem.h"
+#include <cstdlib>
+#include <fmt/format.h>
 #include "common/settings.h"
 #include "core/hle/service/ssl/cert_store.h"
 #include "openpak/session.h"
@@ -87,6 +89,12 @@ void CertStore::ApplyOpenPakCertificate() {
         return;
     }
 
+    // Escape hatch while proving whether the substitution itself is what a title rejects.
+    if (const char* off = std::getenv("OPENPAK_NO_CERT"); off != nullptr && *off == '1') {
+        LOG_WARNING(Service_SSL, "[OpenPak] Certificate substitution disabled by environment");
+        return;
+    }
+
     const std::vector<u8> der = openpak::client::session::CaCertificateDer();
 
     if (der.empty()) {
@@ -130,6 +138,7 @@ Result CertStore::GetCertificates(u32* out_num_entries, std::span<u8> out_data,
     u32 required_size;
     R_TRY(this->GetCertificateBufSize(std::addressof(required_size), out_num_entries,
                                       certificate_ids));
+
     R_UNLESS(out_data.size_bytes() >= required_size, ResultUnknown);
 
     // Make parallel arrays.
@@ -139,8 +148,21 @@ Result CertStore::GetCertificates(u32* out_num_entries, std::span<u8> out_data,
     const u32 der_data_offset = (*out_num_entries + 1) * sizeof(BuiltInCertificateInfo);
     u32 cur_der_offset = der_data_offset;
 
+    // [OpenPak] Which ids the title asked for and which it is actually given: a trust store built
+    // from six of seven certificates fails in a way that looks exactly like a bad certificate.
+    {
+        std::string asked;
+        for (const auto id : certificate_ids) {
+            asked += fmt::format("{} ", static_cast<s32>(id));
+        }
+        LOG_INFO(Service_SSL, "[OpenPak] Certificates asked for: {}-> answering {} of them", asked,
+                 *out_num_entries);
+    }
+
     // Fill output.
     this->ForEachCertificate(certificate_ids, [&](auto& entry) {
+        LOG_DEBUG(Service_SSL, "[OpenPak]   id {} status {} size {}", static_cast<s32>(entry.first),
+                  static_cast<s32>(entry.second.status), entry.second.der_data.size());
         const auto& [status, cur_der_data] = entry.second;
         BuiltInCertificateInfo cert_info{
             .cert_id = entry.first,

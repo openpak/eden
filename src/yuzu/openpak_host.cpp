@@ -63,13 +63,25 @@ OpenPakHost::OpenPakHost(Core::System& system_, QWidget* main_window_,
     // no invitation. The chain is walked off the UI thread because a server that is slow to
     // answer must not be a window that is slow to open.
     std::thread{[this] {
+        // Configure before signing in, or Enabled() is false and Ensure() returns without a
+        // word: the account service configures it too, but not until a game first asks, and the
+        // whole point here is to be online before that.
+        if (Settings::values.enable_openpak.GetValue()) {
+            openpak::client::session::Configure(Settings::values.openpak_server_ip.GetValue(), 443,
+                                                {});
+        }
+
         if (!openpak::client::session::Ensure()) {
             return;
         }
 
-        // Presence says what is being played, which only the host knows. An empty answer is the
-        // game list, and reads as simply online.
+        // Presence says what is being played. The host reads it from the system it owns, on its
+        // own thread, and only while a game is actually loaded.
         openpak::client::session::StartHeartbeat([this] {
+            if (!system.IsPoweredOn()) {
+                return std::string{};
+            }
+
             const u64 program_id = system.GetApplicationProcessProgramID();
 
             return program_id == 0 ? std::string{} : fmt::format("{:016x}", program_id);

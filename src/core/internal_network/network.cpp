@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -1046,6 +1047,69 @@ Errno Socket::SetLinger(bool enable, u32 linger) {
 
 Errno Socket::SetReuseAddr(bool enable) {
     return SetSockOpt<u32>(fd, SO_REUSEADDR, enable ? 1 : 0);
+}
+
+std::pair<u32, Errno> Socket::GetReuseAddr() {
+    return GetSockOpt<u32>(fd, SO_REUSEADDR);
+}
+
+std::pair<u32, Errno> Socket::GetKeepAlive() {
+    return GetSockOpt<u32>(fd, SO_KEEPALIVE);
+}
+
+std::pair<u32, Errno> Socket::GetBroadcast() {
+    return GetSockOpt<u32>(fd, SO_BROADCAST);
+}
+
+std::pair<u32, Errno> Socket::GetSndBuf() {
+    return GetSockOpt<u32>(fd, SO_SNDBUF);
+}
+
+std::pair<u32, Errno> Socket::GetRcvBuf() {
+    return GetSockOpt<u32>(fd, SO_RCVBUF);
+}
+
+Errno Socket::SetNoDelay(bool enable) {
+    const int value = enable ? 1 : 0;
+    if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY,
+                   reinterpret_cast<const char*>(&value), sizeof(value)) == SOCKET_ERROR) {
+        return GetAndLogLastError();
+    }
+    return Errno::SUCCESS;
+}
+
+std::pair<u32, Errno> Socket::GetSndTimeo() {
+    const auto [value, error] = GetSockOpt<timeval>(fd, SO_SNDTIMEO);
+    return {static_cast<u32>(value.tv_sec * 1000 + value.tv_usec / 1000), error};
+}
+
+std::pair<u32, Errno> Socket::GetRcvTimeo() {
+    const auto [value, error] = GetSockOpt<timeval>(fd, SO_RCVTIMEO);
+    return {static_cast<u32>(value.tv_sec * 1000 + value.tv_usec / 1000), error};
+}
+
+std::pair<u32, Errno> Socket::GetLinger(u32* out_linger) {
+    const auto [value, error] = GetSockOpt<struct linger>(fd, SO_LINGER);
+
+    if (out_linger != nullptr) {
+        *out_linger = static_cast<u32>(value.l_linger);
+    }
+
+    return {static_cast<u32>(value.l_onoff), error};
+}
+
+std::pair<u32, Errno> Socket::GetSocketType() {
+    return GetSockOpt<u32>(fd, SO_TYPE);
+}
+
+std::pair<u32, Errno> Socket::GetNoDelay() {
+    int value{};
+    socklen_t size = sizeof(value);
+    if (getsockopt(fd, IPPROTO_TCP, TCP_NODELAY,
+                   reinterpret_cast<char*>(&value), &size) == SOCKET_ERROR) {
+        return {0, GetAndLogLastError()};
+    }
+    return {static_cast<u32>(value), Errno::SUCCESS};
 }
 
 Errno Socket::SetKeepAlive(bool enable) {

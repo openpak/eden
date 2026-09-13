@@ -15,6 +15,7 @@
 #include "common/swap.h"
 #include "core/core.h"
 #include "core/hle/service/ipc_helpers.h"
+#include "core/hle/service/sockets/nsd.h"
 #include "core/hle/service/sockets/sfdnsres.h"
 #include "openpak/network_profile.h"
 #include "core/hle/service/sockets/sockets.h"
@@ -274,14 +275,20 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
     IPC::RequestParser rp{ctx};
     const auto parameters = rp.PopRaw<InputParameters>();
 
-    LOG_WARNING(
-        Service,
-        "called with ignored parameters: use_nsd_resolve={}, cancel_handle={}, process_id={}",
-        parameters.use_nsd_resolve, parameters.cancel_handle, parameters.process_id);
+    LOG_DEBUG(Service, "called: use_nsd_resolve={}, cancel_handle={}, process_id={}",
+              parameters.use_nsd_resolve, parameters.cancel_handle, parameters.process_id);
 
     const auto host_buffer = ctx.ReadBuffer(0);
-    const std::string host = Common::StringFromBuffer(host_buffer);
+    std::string host = Common::StringFromBuffer(host_buffer);
     // For now, ignore options, which are in input buffer 1 for GetHostByNameRequestWithOptions.
+
+    if (parameters.use_nsd_resolve != 0) {
+        std::string resolved = NsdResolve(host);
+        if (resolved != host) {
+            LOG_DEBUG(Network, "nsd resolved '{}' -> '{}'", host, resolved);
+            host = std::move(resolved);
+        }
+    }
 
     // [OpenPak] Redirection wins over the blocklist: these are exactly the hosts the blocklist
     // exists to stop, and pointing them at our own server is the point.
@@ -363,7 +370,13 @@ static std::vector<u8> SerializeAddrInfo(const std::vector<Network::AddrInfo>& v
         Append<u16_be>(data, static_cast<u16>(Translate(addrinfo.addr.family))); // sin_family
         // On the Switch, the following fields are passed through htonl despite
         // already being big-endian, so they end up as little-endian.
-        Append<u16_le>(data, addrinfo.addr.portno);                            // sin_port
+        //
+        // [OpenPak] The port is the exception, and it has to match what the socket layer expects
+        // to receive back: a title hands the sockaddr this returns straight to connect(), and
+        // Translate(SockAddrIn) byte-swaps sin_port on the way in. Written little-endian, 443
+        // comes back round as 0xBB01 -- 47873 -- and the connection goes to a port nobody is
+        // listening on, with the address perfectly correct because only the port is swapped.
+        Append<u16_be>(data, addrinfo.addr.portno);                            // sin_port
         Append<u32_le>(data, Network::IPv4AddressToInteger(addrinfo.addr.ip)); // sin_addr
         data.resize(data.size() + 8, 0);                                       // sin_zero
 
@@ -429,16 +442,22 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
     IPC::RequestParser rp{ctx};
     const auto parameters = rp.PopRaw<InputParameters>();
 
-    LOG_WARNING(
-        Service,
-        "called with ignored parameters: use_nsd_resolve={}, cancel_handle={}, process_id={}",
-        parameters.use_nsd_resolve, parameters.cancel_handle, parameters.process_id);
-
-    // TODO: If use_nsd_resolve is true, pass the name through NSD::Resolve
-    // before looking up.
+    LOG_DEBUG(Service, "called: use_nsd_resolve={}, cancel_handle={}, process_id={}",
+              parameters.use_nsd_resolve, parameters.cancel_handle, parameters.process_id);
 
     const auto host_buffer = ctx.ReadBuffer(0);
-    const std::string host = Common::StringFromBuffer(host_buffer);
+    std::string host = Common::StringFromBuffer(host_buffer);
+
+    // Hardware routes these through nsd first, which is where the '%' in a name becomes the
+    // environment. Skipping it leaves distinct services sharing one name -- the NAT check's two
+    // probes being the case that matters, since they must land on two different addresses.
+    if (parameters.use_nsd_resolve != 0) {
+        std::string resolved = NsdResolve(host);
+        if (resolved != host) {
+            LOG_DEBUG(Network, "nsd resolved '{}' -> '{}'", host, resolved);
+            host = std::move(resolved);
+        }
+    }
 
     // [OpenPak] Redirection wins over the blocklist: these are exactly the hosts the blocklist
     // exists to stop, and pointing them at our own server is the point.

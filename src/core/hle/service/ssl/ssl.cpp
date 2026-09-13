@@ -150,7 +150,8 @@ private:
     bool skip_default_verify = false;
     bool enable_alpn = false;
     std::shared_ptr<Network::SocketBase> socket;
-    std::vector<u8> next_alpn_proto;
+    std::vector<u8> next_alpn_proto;       ///< The length-prefixed list the title offers.
+    std::vector<u8> negotiated_alpn_proto; ///< What the server picked, read back by the title.
     bool did_handshake = false;
     u32 verify_option = 0;
 
@@ -233,12 +234,17 @@ private:
         Result res = backend->DoHandshake();
         did_handshake = res.IsSuccess();
 
-        // GetNextAlpnProto answers with what was chosen, not with what was asked for.
+        // What was chosen is kept apart from what was offered. Overwriting the offered list with
+        // the negotiated name destroys it: "h2" on its own is not a length-prefixed protocol
+        // list, so the next handshake on this connection offers nothing at all and a gRPC server
+        // refuses it outright for having no ALPN. That is one connection succeeding and the next
+        // failing, from the same title, for no visible reason.
         if (did_handshake) {
-            if (std::vector<u8> negotiated = backend->GetNegotiatedAlpnProto(); !negotiated.empty()) {
+            negotiated_alpn_proto = backend->GetNegotiatedAlpnProto();
+
+            if (!negotiated_alpn_proto.empty()) {
                 LOG_DEBUG(Service_SSL, "ALPN negotiated: {}",
-                          std::string(negotiated.begin(), negotiated.end()));
-                next_alpn_proto = std::move(negotiated);
+                          std::string(negotiated_alpn_proto.begin(), negotiated_alpn_proto.end()));
             }
         }
 
@@ -486,11 +492,15 @@ private:
     }
 
     void GetNextAlpnProto(HLERequestContext& ctx) {
+        // The negotiated protocol once there is one; before the handshake, what was offered.
+        const std::vector<u8>& source =
+            negotiated_alpn_proto.empty() ? next_alpn_proto : negotiated_alpn_proto;
+
         const size_t writable = ctx.GetWriteBufferSize();
-        const size_t to_write = (std::min)(next_alpn_proto.size(), writable);
+        const size_t to_write = (std::min)(source.size(), writable);
 
         if (to_write != 0) {
-            ctx.WriteBuffer(std::span<const u8>(next_alpn_proto.data(), to_write));
+            ctx.WriteBuffer(std::span<const u8>(source.data(), to_write));
         }
 
         LOG_DEBUG(Service_SSL, "GetNextAlpnProto called, size={}", to_write);
@@ -682,7 +692,8 @@ private:
 
 class ISslServiceForSystem final : public ServiceFramework<ISslServiceForSystem> {
     public:
-        explicit ISslServiceForSystem(Core::System& system_) : ServiceFramework{system_, "ssl:s"} {
+        explicit ISslServiceForSystem(Core::System& system_)
+            : ServiceFramework{system_, "ssl:s"}, cert_store{system} {
             // clang-format off
             static const FunctionInfo functions[] = {
                 {0, D<&ISslServiceForSystem::CreateContext>, "CreateContext"},
@@ -721,20 +732,16 @@ class ISslServiceForSystem final : public ServiceFramework<ISslServiceForSystem>
             return ResultSuccess;
         };
 
-        Result GetCertificates() {
-            LOG_DEBUG(Service_SSL, "(STUBBED) called.");
-
-            // TODO (jarrodnorwell)
-
-            return ResultSuccess;
+        Result GetCertificates(Out<u32> out_num_entries,
+                               OutBuffer<BufferAttr_HipcMapAlias> out_buffer,
+                               InArray<CaCertificateId, BufferAttr_HipcMapAlias> certificate_ids) {
+            R_RETURN(cert_store.GetCertificates(out_num_entries, out_buffer, certificate_ids));
         };
 
-        Result GetCertificateBufSize() {
-            LOG_DEBUG(Service_SSL, "(STUBBED) called.");
-
-            // TODO (jarrodnorwell)
-
-            return ResultSuccess;
+        Result GetCertificateBufSize(
+            Out<u32> out_size, InArray<CaCertificateId, BufferAttr_HipcMapAlias> certificate_ids) {
+            u32 num_entries;
+            R_RETURN(cert_store.GetCertificateBufSize(out_size, &num_entries, certificate_ids));
         };
 
         Result DebugIoctl() {
@@ -816,6 +823,8 @@ class ISslServiceForSystem final : public ServiceFramework<ISslServiceForSystem>
 
             return ResultSuccess;
         };
+    private:
+        CertStore cert_store;
     };
 
 void LoopProcess(Core::System& system) {
