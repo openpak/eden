@@ -991,10 +991,26 @@ void IGeneralService::IsAnyInternetRequestAccepted(HLERequestContext& ctx) {
     }
 }
 
-void IGeneralService::IsAnyForegroundRequestAccepted(HLERequestContext& ctx) {
-    const bool is_accepted{};
+void IGeneralService::SetExclusiveClient(HLERequestContext& ctx) {
+    // [OpenPak] One client owning the network is a console power-management idea; emulation has
+    // nothing to arbitrate, so the claim is accepted and forgotten. Left unimplemented it answers
+    // the title with an error at the point it is trying to go online.
+    LOG_DEBUG(Service_NIFM, "called");
 
-    LOG_WARNING(Service_NIFM, "(STUBBED) called, is_accepted={}", is_accepted);
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(ResultSuccess);
+}
+
+void IGeneralService::IsAnyForegroundRequestAccepted(HLERequestContext& ctx) {
+    // [OpenPak] A title asks whether its foreground network request was accepted before it
+    // commits to going online, and answering "no" -- which is what an always-false stub says --
+    // ends the attempt there: Stardew sends its NAT-check probes, hears this, and raises the
+    // error applet without ever connecting. There is nothing to arbitrate here, so a request is
+    // accepted whenever the host actually has a network.
+    const bool is_accepted =
+        Network::GetHostIPv4Address().has_value() && !Settings::values.airplane_mode.GetValue();
+
+    LOG_DEBUG(Service_NIFM, "called, is_accepted={}", is_accepted);
 
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
@@ -1079,7 +1095,7 @@ IGeneralService::IGeneralService(Core::System& system_)
         {23, nullptr, "PutToSleep"},
         {24, nullptr, "WakeUp"},
         {25, &IGeneralService::GetSsidListVersion, "GetSsidListVersion"},
-        {26, nullptr, "SetExclusiveClient"},
+        {26, &IGeneralService::SetExclusiveClient, "SetExclusiveClient"},
         {27, nullptr, "GetDefaultIpSetting"},
         {28, nullptr, "SetDefaultIpSetting"},
         {29, nullptr, "SetWirelessCommunicationEnabledForTest"},

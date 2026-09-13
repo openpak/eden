@@ -16,6 +16,7 @@
 #include "core/core.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/sockets/sfdnsres.h"
+#include "openpak/network_profile.h"
 #include "core/hle/service/sockets/sockets.h"
 #include "core/hle/service/sockets/sockets_translate.h"
 #include "core/internal_network/network.h"
@@ -154,6 +155,23 @@ static std::optional<std::string> GetOpenPakRedirectIp(std::string_view host) {
     if (server_ip.empty()) {
         return std::nullopt;
     }
+    // The profile OpenPak publishes decides which names are redirected and where, because it is
+    // generated from the live routing: a title served on a new hostname works without a new
+    // build. Two things it says that a wildcard cannot: a name with an address of its own (the
+    // NAT check compares what two addresses observe of one console, so its second probe must not
+    // collapse onto the first), and a name that must be left alone entirely -- the console's own
+    // connection test measures OpenPak instead of the internet if it is redirected.
+    if (const auto from_profile =
+            openpak::client::profile::RedirectFor(std::string{host}, server_ip);
+        from_profile.has_value()) {
+        return from_profile;
+    }
+
+    if (openpak::client::profile::Loaded()) {
+        // A profile in hand and no match means the name is not ours to answer.
+        return std::nullopt;
+    }
+
     if (IsNatCheckHost(host)) {
         const std::string nat_ip =
             ConfiguredIp(Settings::values.openpak_nat_ip.GetValue(), "OPENPAK_NAT_IP");
@@ -364,6 +382,42 @@ static std::vector<u8> SerializeAddrInfo(const std::vector<Network::AddrInfo>& v
     return data;
 }
 
+
+// [OpenPak] The answer shaped the way a console's own resolver shapes it: one entry per address,
+// socket type and protocol left "any".
+//
+// The hints a title passes are ignored above, so the host's getaddrinfo is free to answer with
+// one entry per socket type -- stream, datagram and raw for a single address. A title that walks
+// that list looking only for what it asked for finds nothing it can use and gives up before it
+// opens a socket: Stardew stops at 2318-0007 with the address resolved and no connection ever
+// attempted. Ryujinx has always written "0 = Any" here, which is why the same title connects
+// there. Off with the integration, so nothing else changes shape.
+static std::vector<Network::AddrInfo> OpenPakAddrInfo(const std::vector<Network::AddrInfo>& vec) {
+    if (!OpenPakActive()) {
+        return vec;
+    }
+
+    std::vector<Network::AddrInfo> out;
+
+    for (const Network::AddrInfo& entry : vec) {
+        const bool already = std::any_of(out.begin(), out.end(), [&](const Network::AddrInfo& seen) {
+            return seen.addr.ip == entry.addr.ip && seen.addr.portno == entry.addr.portno;
+        });
+
+        if (already) {
+            continue;
+        }
+
+        Network::AddrInfo copy = entry;
+        copy.socket_type = Network::Type::Unspecified;
+        copy.protocol = Network::Protocol::Unspecified;
+
+        out.push_back(copy);
+    }
+
+    return out;
+}
+
 static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext& ctx) {
     struct InputParameters {
         u8 use_nsd_resolve;
@@ -407,7 +461,7 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
 
     auto res_v = Network::GetAddressInfo(query_host, service);
     if (auto* res = std::get_if<std::vector<Network::AddrInfo>>(&res_v)) {
-        const std::vector<u8> data = SerializeAddrInfo(*res, host);
+        const std::vector<u8> data = SerializeAddrInfo(OpenPakAddrInfo(*res), host);
         const u32 data_size = u32(data.size());
         ctx.WriteBuffer(data, 0);
         return {data_size, GetAddrInfoError::SUCCESS};

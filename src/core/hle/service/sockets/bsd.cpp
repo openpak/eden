@@ -442,16 +442,22 @@ void BSD_USA::Write(HLERequestContext& ctx) {
                      });
 }
 
+// [OpenPak] read(2) on a descriptor, which the stub answered with "zero bytes, no error" --
+// indistinguishable from end of file. Write was already a real send; only this side was missing,
+// so a title could poll its event fd but never drain it, and Pia waits on exactly that: it parks
+// until the fd signals and reads to clear it. A read that always returns nothing is a wait that
+// never ends.
 void BSD_USA::Read(HLERequestContext& ctx) {
     IPC::RequestParser rp{ctx};
     const s32 fd = rp.Pop<s32>();
 
-    LOG_WARNING(Service, "(STUBBED) called. fd={} len={}", fd, ctx.GetWriteBufferSize());
+    LOG_DEBUG(Service, "called. fd={} len={}", fd, ctx.GetWriteBufferSize());
 
-    IPC::ResponseBuilder rb{ctx, 4};
-    rb.Push(ResultSuccess);
-    rb.Push<u32>(0); // ret
-    rb.Push<u32>(0); // bsd errno
+    ExecuteWork(ctx, RecvWork{
+                         .fd = fd,
+                         .flags = 0,
+                         .message = std::vector<u8>(ctx.GetWriteBufferSize()),
+                     });
 }
 
 void BSD_USA::Close(HLERequestContext& ctx) {
@@ -505,14 +511,77 @@ void BSD_USA::DuplicateSocket(HLERequestContext& ctx) {
     }
 }
 
+// [OpenPak] An event fd a title can actually wait on.
+//
+// The stub answered "success" and no descriptor, so the guest took the returned 0 as its fd --
+// the same number its real socket already had -- and then polled a handle nobody could ever
+// signal. Pia builds its wakeup out of this: it parks on the event fd while a session comes up
+// and moves only when something writes to it, so a stub here is a game that waits for ever.
+//
+// Backed by a datagram socket connected to itself: writing makes it readable, poll() sees it
+// like any other socket, and none of the surrounding plumbing has to learn about a second kind
+// of descriptor. The counter semantics of a real eventfd are approximated by one datagram per
+// write, which is all a wakeup needs.
 void BSD_USA::EventFd(HLERequestContext& ctx) {
     IPC::RequestParser rp{ctx};
     const u64 initval = rp.Pop<u64>();
     const u32 flags = rp.Pop<u32>();
 
-    LOG_WARNING(Service, "(STUBBED) called. initval={}, flags={}", initval, flags);
+    LOG_DEBUG(Service, "called. initval={}, flags={}", initval, flags);
 
-    BuildErrnoResponse(ctx, Errno::SUCCESS);
+    const s32 fd = FindFreeFileDescriptorHandle();
+    if (fd < 0) {
+        LOG_ERROR(Service, "No more file descriptors available");
+        BuildErrnoResponse(ctx, Errno::MFILE);
+        return;
+    }
+
+    auto socket = std::make_shared<Network::Socket>();
+    socket->Initialize(Network::Domain::INET, Network::Type::DGRAM, Network::Protocol::UDP);
+
+    // Loopback, kernel-chosen port, then connected to whatever it was given: a self-pipe.
+    Network::SockAddrIn loopback{};
+    loopback.family = Network::Domain::INET;
+    loopback.ip = {127, 0, 0, 1};
+    loopback.portno = 0;
+
+    if (socket->Bind(loopback) != Network::Errno::SUCCESS) {
+        LOG_ERROR(Service, "Could not bind an event fd");
+        BuildErrnoResponse(ctx, Errno::INVAL);
+        return;
+    }
+
+    const auto [local, local_errno] = socket->GetSockName();
+    if (local_errno != Network::Errno::SUCCESS ||
+        socket->Connect(local) != Network::Errno::SUCCESS) {
+        LOG_ERROR(Service, "Could not connect an event fd to itself");
+        BuildErrnoResponse(ctx, Errno::INVAL);
+        return;
+    }
+
+    socket->SetNonBlock(true);
+
+    file_descriptors[fd] = FileDescriptor{};
+    FileDescriptor& descriptor = *file_descriptors[fd];
+    descriptor.socket = socket;
+    descriptor.is_connection_based = false;
+    descriptor.flags = Network::FLAG_O_NONBLOCK;
+
+    descriptor.event_value = std::make_shared<std::atomic<u64>>(initval);
+
+    // One byte, not one per count: the byte only makes poll() say "readable", and the value the
+    // guest reads comes from the counter. A real event fd answers a read with the whole count at
+    // once and resets; handing out one wakeup per unit instead tells a title six things happened
+    // when one did, and Pia's accounting never recovers from that.
+    if (initval > 0) {
+        const u8 wake = 1;
+        void(socket->Send(std::span<const u8>{&wake, 1}, 0));
+    }
+
+    IPC::ResponseBuilder rb{ctx, 4};
+    rb.Push(ResultSuccess);
+    rb.Push<s32>(fd);
+    rb.PushEnum(Errno::SUCCESS);
 }
 
 template <typename Work>
@@ -621,7 +690,14 @@ std::pair<s32, Errno> BSD_USA::PollImpl(std::vector<u8>& write_buffer, std::span
         return result;
     });
 
-    const auto result = Network::Poll(host_pollfds, timeout);
+    // [OpenPak] An infinite poll is served in slices. The Bsd service has one thread, so a poll
+    // that blocks forever parks the very thread that would have to process the event ending the
+    // wait -- including the guest's own eventfd write. Pia polls a single fd with timeout=-1 while
+    // it sets up a session, and a title that waits there never comes back. Returning "nothing
+    // ready yet" is a legitimate poll result the caller already handles by asking again.
+    constexpr s32 InfinitePollSliceMs = 250;
+    const auto result =
+        Network::Poll(host_pollfds, timeout < 0 ? InfinitePollSliceMs : timeout);
 
     const size_t num = host_pollfds.size();
     for (size_t i = 0; i < num; ++i) {
@@ -891,6 +967,29 @@ std::pair<s32, Errno> BSD_USA::RecvImpl(s32 fd, u32 flags, std::vector<u8>& mess
 
     FileDescriptor& descriptor = *file_descriptors[fd];
 
+    // [OpenPak] An event fd answers with its count and clears it, in one read.
+    if (descriptor.event_value) {
+        const u64 value = descriptor.event_value->exchange(0);
+
+        if (value == 0) {
+            return {-1, Errno::AGAIN};
+        }
+
+        // Take the wakeup byte back out, so poll() stops reporting it as readable.
+        std::vector<u8> drain(8);
+        void(descriptor.socket->Recv(0, drain));
+
+        if (message.size() < sizeof(u64)) {
+            return {-1, Errno::INVAL};
+        }
+
+        std::memcpy(message.data(), &value, sizeof(value));
+
+        LOG_DEBUG(Service, "Event fd {} read {}", fd, value);
+
+        return {static_cast<s32>(sizeof(u64)), Errno::SUCCESS};
+    }
+
     // Apply flags
     using Network::FLAG_MSG_DONTWAIT;
     using Network::FLAG_O_NONBLOCK;
@@ -938,11 +1037,42 @@ std::pair<s32, Errno> BSD_USA::RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& 
         }
     }
 
-    const auto [ret, bsd_errno] = Translate(descriptor.socket->RecvFrom(flags, message, p_addr_in));
+    auto [ret, bsd_errno] = Translate(descriptor.socket->RecvFrom(flags, message, p_addr_in));
+
+    // [OpenPak] One unreachable peer must not read as the network dropping. A datagram socket
+    // shared across peers -- which is what a NAT check and every P2P session use -- collects an
+    // ICMP error from any of them, and the next read returns that error instead of the datagram
+    // waiting behind it. Take the next one instead.
+    if (!descriptor.is_connection_based) {
+        for (int attempt = 0; attempt < 16 && (bsd_errno == Errno::CONNREFUSED ||
+                                               bsd_errno == Errno::CONNRESET); ++attempt) {
+            LOG_DEBUG(Service, "Discarding queued ICMP error on fd={} errno={}", fd,
+                      static_cast<int>(bsd_errno));
+            std::tie(ret, bsd_errno) =
+                Translate(descriptor.socket->RecvFrom(flags, message, p_addr_in));
+        }
+    }
 
     // Restore original state
     if ((descriptor.flags & FLAG_O_NONBLOCK) == 0) {
         descriptor.socket->SetNonBlock(false);
+    }
+
+    // [OpenPak] Every datagram that arrives, with its source: a reply that never reaches the
+    // guest and a reply that was never sent look identical without this.
+    if (p_addr_in != nullptr && ret > 0) {
+        LOG_DEBUG(Service, "RecvFrom fd={} <- {}:{} len={}", fd,
+                  Network::IPv4AddressToString(p_addr_in->ip), p_addr_in->portno, ret);
+    }
+
+    // [OpenPak] The NAT check's answer is 16 bytes: [type][external port][external ip][server ip].
+    // It is the only place this console is told how the outside world sees it, and a station
+    // address built from the private LAN address instead is one nobody can dial.
+    if (p_addr_in != nullptr && ret == 16 &&
+        (p_addr_in->portno == 10025 || p_addr_in->portno == 10125)) {
+        LOG_INFO(Service, "[OpenPak] NAT check: external address {}.{}.{}.{} (from {}:{})",
+                 message[8], message[9], message[10], message[11],
+                 Network::IPv4AddressToString(p_addr_in->ip), p_addr_in->portno);
     }
 
     if (p_addr_in) {
@@ -961,6 +1091,27 @@ std::pair<s32, Errno> BSD_USA::RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& 
 std::pair<s32, Errno> BSD_USA::SendImpl(s32 fd, u32 flags, std::span<const u8> message) {
     if (!IsFileDescriptorValid(fd)) {
         return {-1, Errno::BADF};
+    }
+
+    // [OpenPak] Writing an event fd adds to its count and wakes whoever is polling it.
+    if (file_descriptors[fd]->event_value) {
+        if (message.size() < sizeof(u64)) {
+            return {-1, Errno::INVAL};
+        }
+
+        u64 value{};
+        std::memcpy(&value, message.data(), sizeof(value));
+
+        const u64 previous = file_descriptors[fd]->event_value->fetch_add(value);
+
+        if (previous == 0 && value > 0) {
+            const u8 wake = 1;
+            void(file_descriptors[fd]->socket->Send(std::span<const u8>{&wake, 1}, 0));
+        }
+
+        LOG_DEBUG(Service, "Event fd {} written {} (now {})", fd, value, previous + value);
+
+        return {static_cast<s32>(sizeof(u64)), Errno::SUCCESS};
     }
     if (!file_descriptors[fd]->socket) {
         LOG_WARNING(Service, "Uninitialized socket");
@@ -988,7 +1139,17 @@ std::pair<s32, Errno> BSD_USA::SendToImpl(s32 fd, u32 flags, std::span<const u8>
         p_addr_in = &addr_in;
     }
 
-    return Translate(file_descriptors[fd]->socket->SendTo(flags, message, p_addr_in));
+    const auto result = Translate(file_descriptors[fd]->socket->SendTo(flags, message, p_addr_in));
+
+    // [OpenPak] Where a datagram went, which is the one thing a NAT check's log has to show:
+    // probes that leave for the wrong address look exactly like probes nobody answered.
+    if (p_addr_in != nullptr) {
+        LOG_DEBUG(Service, "SendTo fd={} -> {}:{} len={} ret={}", fd,
+                  Network::IPv4AddressToString(p_addr_in->ip), p_addr_in->portno, message.size(),
+                  result.first);
+    }
+
+    return result;
 }
 
 Errno BSD_USA::CloseImpl(s32 fd) {

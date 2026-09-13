@@ -187,6 +187,32 @@ public:
         }
     }
 
+    // The title's own protocol list, handed to OpenSSL as it arrived: SetNextAlpnProto already
+    // carries the length-prefixed wire form SSL_set_alpn_protos wants.
+    void SetAlpnProtos(std::span<const u8> protos) override {
+        if (protos.empty()) {
+            return;
+        }
+        if (SSL_set_alpn_protos(ssl, protos.data(), static_cast<unsigned>(protos.size())) != 0) {
+            LOG_ERROR(Service_SSL, "SSL_set_alpn_protos failed");
+            return;
+        }
+        LOG_DEBUG(Service_SSL, "ALPN offered, {} bytes of protocol list", protos.size());
+    }
+
+    std::vector<u8> GetNegotiatedAlpnProto() override {
+        const unsigned char* selected = nullptr;
+        unsigned int length = 0;
+
+        SSL_get0_alpn_selected(ssl, &selected, &length);
+
+        if (selected == nullptr || length == 0) {
+            return {};
+        }
+
+        return {selected, selected + length};
+    }
+
     Result DoHandshake() override {
         SSL_set_verify_result(ssl, X509_V_OK);
         const int ret = SSL_do_handshake(ssl);

@@ -217,8 +217,31 @@ private:
 
     Result DoHandshakeImpl() {
         ASSERT_OR_EXECUTE(!did_handshake && socket, { return ResultNoSocket; });
+
+        // The list the title set has to reach the handshake, or nothing is negotiated and a
+        // server that speaks HTTP/2 answers HTTP/1.1: the title's gRPC then waits on a preface
+        // that never arrives. The option gates it exactly as the firmware does.
+        // Offered whenever the title supplied a list, rather than only when it also set the
+        // option: a title that troubled itself to name its protocols wants them, and offering
+        // one nobody selects costs nothing.
+        if (!next_alpn_proto.empty()) {
+            LOG_DEBUG(Service_SSL, "Offering ALPN ({} bytes, option={})", next_alpn_proto.size(),
+                      enable_alpn);
+            backend->SetAlpnProtos(next_alpn_proto);
+        }
+
         Result res = backend->DoHandshake();
         did_handshake = res.IsSuccess();
+
+        // GetNextAlpnProto answers with what was chosen, not with what was asked for.
+        if (did_handshake) {
+            if (std::vector<u8> negotiated = backend->GetNegotiatedAlpnProto(); !negotiated.empty()) {
+                LOG_DEBUG(Service_SSL, "ALPN negotiated: {}",
+                          std::string(negotiated.begin(), negotiated.end()));
+                next_alpn_proto = std::move(negotiated);
+            }
+        }
+
         return res;
     }
 

@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include <memory>
 #include <span>
 #include <vector>
@@ -47,6 +49,9 @@ private:
         std::shared_ptr<Network::SocketBase> socket;
         s32 flags = 0;
         bool is_connection_based = false;
+        // [OpenPak] Non-null makes this an event fd: the counter a read returns and clears, with
+        // the socket above serving only to make it pollable.
+        std::shared_ptr<std::atomic<u64>> event_value;
     };
 
     struct PollWork {

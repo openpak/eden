@@ -92,6 +92,7 @@ extern "C" {
 #include "hid_core/hid_types.h"
 #include "input_common/drivers/virtual_amiibo.h"
 #include "jni/native.h"
+#include "jni/openpak_native.h"
 #include "video_core/frame_gen/lossless_dll.h"
 #include "video_core/renderer_base.h"
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
@@ -358,6 +359,10 @@ Core::SystemResultStatus EmulationSession::InitializeEmulation(const std::string
 void EmulationSession::ShutdownEmulation() {
     std::scoped_lock lock(m_mutex);
 
+    // [OpenPak] Nothing is being played from this moment, whatever happens to the rest of the
+    // shutdown; presence should say so rather than name a title that is being torn down.
+    OpenPakSetRunningTitle(0);
+
     if (m_next_program_index != -1) {
         ChangeProgram(m_next_program_index);
         m_next_program_index = -1;
@@ -408,6 +413,11 @@ void EmulationSession::RunEmulation() {
         std::scoped_lock lock(m_mutex);
         m_is_running = true;
     }
+
+    // [OpenPak] Presence says what is being played, and it is said from a thread that must never
+    // reach into Core::System to find out: the title is pushed from here, where the session is
+    // known to exist, instead of pulled out of it from a timer.
+    OpenPakSetRunningTitle(m_system.GetApplicationProcessProgramID());
 
     // Load the disk shader cache.
     if (Settings::values.use_disk_shader_cache.GetValue()) {
