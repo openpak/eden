@@ -63,12 +63,34 @@ NSD::NSD(Core::System& system_, const char* name) : ServiceFramework{system_, na
     RegisterHandlers(functions);
 }
 
+std::string NsdResolve(const std::string& fqdn_in) {
+    // A console asks for names with a '%' where the environment goes, and nsd is what fills it
+    // in before anything resolves them -- so "nncs2-%.n.n.srv.nintendo.net" is a different host
+    // from "nncs1-%..." only after this runs. Names below are passed through as hardware does.
+    if (fqdn_in == "api.sect.srv.nintendo.net" || fqdn_in == "ctest.cdn.nintendo.net" ||
+        fqdn_in == "ctest.cdn.n.nintendoswitch.cn" || fqdn_in == "unknown.dummy.nintendo.net") {
+        return fqdn_in;
+    }
+
+    std::string fqdn = fqdn_in;
+    for (std::size_t pos = fqdn.find('%'); pos != std::string::npos; pos = fqdn.find('%', pos + 3)) {
+        fqdn.replace(pos, 1, "lp1");
+    }
+
+    if (fqdn == "e97b8a9d672e4ce4845ec6947cd66ef6-sb.accounts.nintendo.com") {
+        return "e97b8a9d672e4ce4845ec6947cd66ef6-sb.baas.nintendo.com";
+    }
+    if (fqdn == "accounts.nintendo.com") {
+        return "e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com";
+    }
+
+    return fqdn;
+}
+
 static std::string ResolveImpl(const std::string& fqdn_in) {
-    // The real implementation makes various substitutions.
-    // For now we just return the string as-is, which is good enough when not
-    // connecting to real Nintendo servers.
-    LOG_WARNING(Service, "(STUBBED) called, fqdn_in={}", fqdn_in);
-    return fqdn_in;
+    const std::string resolved = NsdResolve(fqdn_in);
+    LOG_DEBUG(Service, "called, fqdn_in={} -> {}", fqdn_in, resolved);
+    return resolved;
 }
 
 static Result ResolveCommon(const std::string& fqdn_in, std::array<char, 0x100>& fqdn_out) {

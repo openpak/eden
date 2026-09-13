@@ -23,6 +23,7 @@ enum class Errno : u32 {
     MFILE = 24,
     PIPE = 32,
     MSGSIZE = 90,
+    NOPROTOOPT = 92, // an option this build cannot answer, said the way hardware says it
     CONNABORTED = 103,
     CONNRESET = 104,
     NOTCONN = 107,
@@ -198,6 +199,7 @@ enum class OptName : u32 {
     SNDTIMEO = 0x1005,
     RCVTIMEO = 0x1006,
     ERROR_ = 0x1007,   // avoid name collision with Windows macro
+    TYPE = 0x1008,
     NOSIGPIPE = 0x800, // at least according to libnx
     ACCEPTFILTER = 0x1000,
     BINTIME = 0x2000,

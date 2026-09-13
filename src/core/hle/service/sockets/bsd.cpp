@@ -766,6 +766,12 @@ Errno BSD_USA::ConnectImpl(s32 fd, std::span<const u8> addr) {
 
     const Errno result = Translate(file_descriptors[fd]->socket->Connect(Translate(addr_in)));
 
+    // [OpenPak] Where a connection went and whether it took: a title dialling the wrong address
+    // and one dialling the right address and being refused look identical without this.
+    LOG_DEBUG(Service, "[OpenPak] Connect fd={} -> {}.{}.{}.{}:{} -> errno {}", fd, addr_in.ip[0],
+              addr_in.ip[1], addr_in.ip[2], addr_in.ip[3], addr_in.portno,
+              static_cast<u32>(result));
+
     if (result == Errno::ISCONN) {
         LOG_DEBUG(Service, "returned ISCONN - socket already connected");
         return Errno::SUCCESS;
@@ -868,6 +874,19 @@ Errno BSD_USA::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8
         return Errno::BADF;
     }
 
+    // TCP option 1 is TCP_NODELAY, separate from the SOL_SOCKET options.
+    if (level == static_cast<u32>(SocketLevel::TCP) && static_cast<u32>(optname) == 1) {
+        if (optval.size() < sizeof(u32)) {
+            return Errno::INVAL;
+        }
+        auto [value, error] = file_descriptors[fd]->socket->GetNoDelay();
+        if (error == Network::Errno::SUCCESS) {
+            optval.resize(sizeof(value));
+            PutValue(optval, value);
+        }
+        return Translate(error);
+    }
+
     if (level != static_cast<u32>(SocketLevel::SOCKET)) {
         UNIMPLEMENTED_MSG("Unknown getsockopt level");
         return Errno::SUCCESS;
@@ -875,7 +894,59 @@ Errno BSD_USA::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8
 
     Network::SocketBase* const socket = file_descriptors[fd]->socket.get();
 
+    const auto read_scalar = [&](auto getter) {
+        if (optval.size() < sizeof(u32)) {
+            return Errno::INVAL;
+        }
+        const auto [value, error] = (socket->*getter)();
+        if (error == Network::Errno::SUCCESS) {
+            optval.resize(sizeof(value));
+            PutValue(optval, value);
+        }
+        return Translate(error);
+    };
+
     switch (optname) {
+    case OptName::REUSEADDR:
+        return read_scalar(&Network::SocketBase::GetReuseAddr);
+    case OptName::KEEPALIVE:
+        return read_scalar(&Network::SocketBase::GetKeepAlive);
+    case OptName::BROADCAST:
+        return read_scalar(&Network::SocketBase::GetBroadcast);
+    case OptName::SNDBUF:
+        return read_scalar(&Network::SocketBase::GetSndBuf);
+    case OptName::RCVBUF:
+        return read_scalar(&Network::SocketBase::GetRcvBuf);
+    case OptName::SNDTIMEO:
+        return read_scalar(&Network::SocketBase::GetSndTimeo);
+    case OptName::RCVTIMEO:
+        return read_scalar(&Network::SocketBase::GetRcvTimeo);
+    case OptName::TYPE:
+        return read_scalar(&Network::SocketBase::GetSocketType);
+    case OptName::LINGER: {
+        // Two fields, so it does not go through read_scalar: a title reads back the struct it set.
+        if (optval.size() < sizeof(Linger)) {
+            return Errno::INVAL;
+        }
+
+        u32 seconds{};
+        const auto [onoff, error] = socket->GetLinger(&seconds);
+
+        if (error == Network::Errno::SUCCESS) {
+            optval.resize(sizeof(Linger));
+            PutValue(optval, Linger{.onoff = onoff, .linger = seconds});
+        }
+
+        return Translate(error);
+    }
+    case OptName::NOSIGPIPE:
+        // Set is a no-op here, so the honest readback is the value a no-op leaves behind.
+        if (optval.size() < sizeof(u32)) {
+            return Errno::INVAL;
+        }
+        optval.resize(sizeof(u32));
+        PutValue(optval, u32{0});
+        return Errno::SUCCESS;
     case OptName::ERROR_: {
         auto [pending_err, getsockopt_err] = socket->GetPendingError();
         if (getsockopt_err == Network::Errno::SUCCESS) {
@@ -889,8 +960,10 @@ Errno BSD_USA::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8
         return Translate(getsockopt_err);
     }
     default:
-        UNIMPLEMENTED_MSG("Unimplemented optname={}", optname);
-        return Errno::SUCCESS;
+        // Not "success with a zero": a caller that asked for something this build cannot answer
+        // is told so, the way hardware tells it, instead of being handed a value that looks real.
+        LOG_WARNING(Service, "Unimplemented getsockopt optname={:#x}", static_cast<u32>(optname));
+        return Errno::NOPROTOOPT;
     }
 }
 
@@ -901,6 +974,13 @@ Errno BSD_USA::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<cons
     if (!file_descriptors[fd]->socket) {
         LOG_WARNING(Service, "Uninitialized socket");
         return Errno::BADF;
+    }
+
+    if (level == static_cast<u32>(SocketLevel::TCP) && static_cast<u32>(optname) == 1) {
+        if (optval.size() < sizeof(u32)) {
+            return Errno::INVAL;
+        }
+        return Translate(file_descriptors[fd]->socket->SetNoDelay(GetValue<u32>(optval) != 0));
     }
 
     if (level != static_cast<u32>(SocketLevel::SOCKET)) {

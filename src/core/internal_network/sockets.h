@@ -72,6 +72,24 @@ public:
     virtual Errno SetReuseAddr(bool enable) = 0;
 
     virtual Errno SetKeepAlive(bool enable) = 0;
+    virtual std::pair<u32, Errno> GetReuseAddr() { return {0, Errno::INVAL}; }
+    virtual std::pair<u32, Errno> GetKeepAlive() { return {0, Errno::INVAL}; }
+    virtual std::pair<u32, Errno> GetBroadcast() { return {0, Errno::INVAL}; }
+    virtual std::pair<u32, Errno> GetSndBuf() { return {0, Errno::INVAL}; }
+    virtual std::pair<u32, Errno> GetRcvBuf() { return {0, Errno::INVAL}; }
+
+
+    virtual Errno SetNoDelay(bool enable) { return Errno::INVAL; }
+    virtual std::pair<u32, Errno> GetNoDelay() { return {0, Errno::INVAL}; }
+
+    // [OpenPak] Everything settable is readable. A title that sets an option and reads it back to
+    // check it took -- Pia does, option by option -- is told "no error, value zero" by a missing
+    // getter, which reads as "the setting did not stick" and stops it dead. The default answers
+    // INVAL so a gap is visible rather than silently wrong.
+    virtual std::pair<u32, Errno> GetSndTimeo() { return {0, Errno::INVAL}; }
+    virtual std::pair<u32, Errno> GetRcvTimeo() { return {0, Errno::INVAL}; }
+    virtual std::pair<u32, Errno> GetLinger(u32* out_linger) { return {0, Errno::INVAL}; }
+    virtual std::pair<u32, Errno> GetSocketType() { return {0, Errno::INVAL}; }
 
     virtual Errno SetBroadcast(bool enable) = 0;
 
@@ -140,12 +158,25 @@ public:
     Errno SetReuseAddr(bool enable) override;
 
     Errno SetKeepAlive(bool enable) override;
+    std::pair<u32, Errno> GetReuseAddr() override;
+    std::pair<u32, Errno> GetKeepAlive() override;
+    std::pair<u32, Errno> GetBroadcast() override;
+    std::pair<u32, Errno> GetSndBuf() override;
+    std::pair<u32, Errno> GetRcvBuf() override;
+
+    Errno SetNoDelay(bool enable) override;
+    std::pair<u32, Errno> GetNoDelay() override;
 
     Errno SetBroadcast(bool enable) override;
 
     Errno SetSndBuf(u32 value) override;
 
     Errno SetRcvBuf(u32 value) override;
+
+    std::pair<u32, Errno> GetSndTimeo() override;
+    std::pair<u32, Errno> GetRcvTimeo() override;
+    std::pair<u32, Errno> GetLinger(u32* out_linger) override;
+    std::pair<u32, Errno> GetSocketType() override;
 
     Errno SetSndTimeo(u32 value) override;
 

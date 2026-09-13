@@ -90,6 +90,12 @@ void ServiceFrameworkBase::InvokeRequest(HLERequestContext& ctx) {
         return ReportUnimplementedFunction(ctx, info);
 
     LOG_TRACE(Service, "{}", MakeFunctionString(info->name, GetServiceName(), ctx.CommandBuffer()));
+
+    // [OpenPak] One line per command the guest issues, so a title's own sequence can be diffed
+    // against an emulator that gets further. Reading which call a game never makes is the only
+    // way to find the one an implementation answered badly enough to change its mind.
+    LOG_DEBUG(Service, "[IPC] {}::{} (cmd {})", GetServiceName(), info->name, command);
+
     handler_invoker(this, info->handler_callback, ctx);
 
     if (is_i_storage && is_cmd_read) {
