@@ -35,6 +35,7 @@
 #include "core/file_sys/vfs/vfs.h"
 #include "core/hle/service/acc/profile_manager.h"
 #include "openpak/compatible_titles.h"
+#include "openpak/session.h"
 #include "openpak/qt/chat_client.h"
 #include "yuzu/openpak_host.h"
 #include "openpak/qt/save_sync.h"
@@ -56,6 +57,24 @@ OpenPakHost::OpenPakHost(Core::System& system_, QWidget* main_window_,
     invitation_poll_timer.setInterval(5000);
     connect(&invitation_poll_timer, &QTimer::timeout, this, &OpenPakHost::PollInvitations);
     invitation_poll_timer.start();
+
+    // [OpenPak] Sign in now rather than when a game first asks. Being online is the point of the
+    // integration: until this runs the account is offline, invisible to friends, and hears about
+    // no invitation. The chain is walked off the UI thread because a server that is slow to
+    // answer must not be a window that is slow to open.
+    std::thread{[this] {
+        if (!openpak::client::session::Ensure()) {
+            return;
+        }
+
+        // Presence says what is being played, which only the host knows. An empty answer is the
+        // game list, and reads as simply online.
+        openpak::client::session::StartHeartbeat([this] {
+            const u64 program_id = system.GetApplicationProcessProgramID();
+
+            return program_id == 0 ? std::string{} : fmt::format("{:016x}", program_id);
+        });
+    }}.detach();
 
     PollFriends();
     EnsureChatConnected(); // no-op if not already signed in

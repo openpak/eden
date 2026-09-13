@@ -64,7 +64,12 @@ if (IOS)
 endif()
 AddJsonPackage(httplib)
 
-# OpenPak client + Qt dialogs (submodule)
+# OpenPak client + Qt dialogs (submodule). The dialogs are Qt; the Android build has no Qt at
+# all (-DENABLE_QT=0) and would fail on the library's own find_package, so it takes the client
+# half only -- which is where the sign-in chain, presence and invitations live anyway.
+if (NOT ENABLE_QT)
+    set(OPENPAK_BUILD_QT OFF CACHE BOOL "" FORCE)
+endif()
 add_subdirectory(openpak-client)
 
 if (YUZU_STATIC_ROOM)

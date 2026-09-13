@@ -17,6 +17,7 @@ add_library(yuzu-android SHARED
     android_config.cpp
     android_config.h
     native_input.cpp
+    openpak_native.cpp
 )
 
 set_property(TARGET yuzu-android PROPERTY IMPORTED_LOCATION ${FFmpeg_LIBRARY_DIR})
@@ -28,6 +29,10 @@ if (ARCHITECTURE_arm64)
 endif()
 
 target_link_libraries(yuzu-android PRIVATE ${FFmpeg_LIBRARIES} OpenSSL::SSL cpp-jwt::cpp-jwt)
+
+# The OpenPak sign-in chain, presence and invitation inbox: the same library the desktop build
+# uses, minus its Qt half.
+target_link_libraries(yuzu-android PRIVATE openpak::client)
 if (ENABLE_UPDATE_CHECKER)
     target_compile_definitions(yuzu-android PUBLIC ENABLE_UPDATE_CHECKER)
 endif()
