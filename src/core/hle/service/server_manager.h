@@ -46,6 +46,8 @@ public:
     Result ManageNamedPort(const std::string& service_name,
                            SessionRequestHandlerFactory&& handler_factory, u32 max_sessions = 64);
     Result ManageDeferral(Kernel::KEvent** out_event);
+    // Recheck pending requests whose readiness can change outside guest IPC.
+    void StartDeferralPolling(std::chrono::milliseconds interval);
 
     Result LoopProcess();
     void StartAdditionalHostThreads(const char* name, size_t num_threads);
@@ -91,6 +93,7 @@ private:
     // Host state tracking
     Common::Event m_stopped{};
     std::vector<std::jthread> m_threads{};
+    std::jthread m_deferral_thread{};
     std::stop_source m_stop_source{};
 };
 
