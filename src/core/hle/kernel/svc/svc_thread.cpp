@@ -80,6 +80,9 @@ Result CreateThread(Core::System& system, Handle* out_handle, u64 entry_point, u
     // Pass the thread handle to the thread local region.
     process.GetMemory().Write32(GetInteger(thread->GetTlsAddress()) + 0x110, *out_handle);
 
+    LOG_DEBUG(Kernel_SVC, "Created thread={} tls={:#x} entry={:#x}", thread->GetThreadId(),
+              GetInteger(thread->GetTlsAddress()), entry_point);
+
     R_SUCCEED();
 }
 

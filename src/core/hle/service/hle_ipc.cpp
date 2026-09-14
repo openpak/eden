@@ -351,6 +351,16 @@ std::span<const u8> HLERequestContext::ReadBufferX(std::size_t buffer_index) con
                    BufferDescriptorX()[buffer_index].Size(), &read_buffer_data_x[buffer_index]);
 }
 
+std::span<const u8> HLERequestContext::ReadBufferB(std::size_t buffer_index) const {
+    Core::Memory::CpuGuestMemory<u8, Core::Memory::GuestMemoryFlags::UnsafeRead> gm(memory, 0, 0);
+
+    ASSERT_OR_EXECUTE_MSG(
+        BufferDescriptorB().size() > buffer_index, { return {}; },
+        "BufferDescriptorB invalid buffer_index {}", buffer_index);
+    return gm.Read(BufferDescriptorB()[buffer_index].Address(),
+                   BufferDescriptorB()[buffer_index].Size(), &read_buffer_data_b[buffer_index]);
+}
+
 std::span<const u8> HLERequestContext::ReadBuffer(std::size_t buffer_index) const {
     Core::Memory::CpuGuestMemory<u8, Core::Memory::GuestMemoryFlags::UnsafeRead> gm(memory, 0, 0);
 

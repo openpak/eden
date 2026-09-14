@@ -266,6 +266,11 @@ public:
     /// Helper function to get a span of a buffer using the buffer descriptor X
     [[nodiscard]] std::span<const u8> ReadBufferX(std::size_t buffer_index = 0) const;
 
+    /// Reads a buffer the guest passed as a receive (B) descriptor. A receive buffer is normally
+    /// only written, but a few commands -- bsd's SendMMsg/RecvMMsg -- hand one over already
+    /// filled in and expect it read, updated and handed back.
+    [[nodiscard]] std::span<const u8> ReadBufferB(std::size_t buffer_index = 0) const;
+
     /// Helper function to get a span of a buffer using the appropriate buffer descriptor
     [[nodiscard]] std::span<const u8> ReadBuffer(std::size_t buffer_index = 0) const;
 
@@ -414,6 +419,7 @@ private:
 
     mutable std::array<Common::ScratchBuffer<u8>, 3> read_buffer_data_a{};
     mutable std::array<Common::ScratchBuffer<u8>, 3> read_buffer_data_x{};
+    mutable std::array<Common::ScratchBuffer<u8>, 3> read_buffer_data_b{};
 
     std::optional<IPC::CommandHeader> command_header;
     std::optional<IPC::HandleDescriptorHeader> handle_descriptor_header;

@@ -98,6 +98,10 @@ void ServiceFrameworkBase::InvokeRequest(HLERequestContext& ctx) {
 
     handler_invoker(this, info->handler_callback, ctx);
 
+    if (ctx.GetThread().GetThreadId() == 98) {
+        LOG_INFO(Service, "Trace thread=98 completed {}::{}", GetServiceName(), info->name);
+    }
+
     if (is_i_storage && is_cmd_read) {
         const auto* const process = ctx.GetThread().GetOwnerProcess();
         if (process != nullptr && system.IsNVDECActiveForProcess(process->GetId())) {
