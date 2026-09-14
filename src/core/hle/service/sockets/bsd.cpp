@@ -254,8 +254,7 @@ void BSD_USA::Poll(HLERequestContext& ctx) {
         std::vector<u8> write_buffer(ctx.GetWriteBufferSize());
         auto [ret, bsd_errno] = PollImpl(write_buffer, read_buffer, nfds, /*timeout=*/0);
 
-        // A bounded wait whose deadline passed answers ETIMEDOUT, exactly like a real poll()
-        // once its time is up, instead of deferring forever.
+        // An expired poll succeeds with zero ready descriptors.
         if (ret == 0 && bsd_errno == Errno::SUCCESS && existing_deadline &&
             std::chrono::steady_clock::now() >= *existing_deadline) {
             std::scoped_lock snapshot_lock{deferred_poll_snapshot_mutex};
@@ -266,7 +265,7 @@ void BSD_USA::Poll(HLERequestContext& ctx) {
             IPC::ResponseBuilder rb{ctx, 4};
             rb.Push(ResultSuccess);
             rb.Push<s32>(0);
-            rb.PushEnum(Errno::TIMEDOUT);
+            rb.PushEnum(Errno::SUCCESS);
             return;
         }
 

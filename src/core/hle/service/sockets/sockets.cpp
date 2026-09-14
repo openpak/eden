@@ -85,14 +85,12 @@ void LoopProcess(Core::System& system) {
 
     server_manager->StartAdditionalHostThreads("bsdsocket", 2);
 
-    // [OpenPak] The deferred-poll machinery: one event BSD::Poll waits on instead of holding a
-    // worker thread, signalled by the eventfd Write path. No timer heartbeat: the drain in
-    // PollImpl consumes each wakeup exactly once, so every deferral event signal corresponds to
-    // real new state, and a timer here only pegs the shared socket-service thread with
-    // re-checks between them.
+    // Eventfd writes wake polls immediately. Host socket readiness and finite deadlines
+    // also need rechecks, even when the guest has no other work to wake its poller.
     Kernel::KEvent* deferral_event{};
     server_manager->ManageDeferral(&deferral_event);
     SetBsdDeferralEvent(deferral_event);
+    server_manager->StartDeferralPolling(std::chrono::milliseconds{10});
 
     ServerManager::RunServer(std::move(server_manager));
 }

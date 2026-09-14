@@ -7,6 +7,7 @@
 #pragma once
 
 #include <string_view>
+#include <vector>
 
 #include "core/hle/service/service.h"
 
@@ -14,11 +15,18 @@ namespace Core {
 class System;
 }
 
+namespace Network {
+struct AddrInfo;
+}
+
 namespace Service::Sockets {
 
 // [OpenPak] Which hostnames the OpenPak redirect claims. Exposed for the unit test.
 bool IsNintendoHost(std::string_view host);
 bool IsNatCheckHost(std::string_view host);
+
+std::vector<u8> SerializeAddrInfo(const std::vector<Network::AddrInfo>& entries,
+                                 std::string_view host);
 
 class SFDNSRES final : public ServiceFramework<SFDNSRES> {
 public:

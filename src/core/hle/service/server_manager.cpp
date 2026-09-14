@@ -95,9 +95,12 @@ ServerManager::ServerManager(Core::System& system)
 }
 
 ServerManager::~ServerManager() {
-    // Signal stop.
+    // Stop the recheck worker before destroying its event or pending sessions.
     m_stop_source.request_stop();
     m_wakeup_event->Signal(m_system.Kernel());
+    if (m_deferral_thread.joinable()) {
+        m_deferral_thread.join();
+    }
 
     // Wait for processing to stop.
     m_stopped.Wait();
@@ -131,6 +134,24 @@ ServerManager::~ServerManager() {
 
 void ServerManager::RunServer(std::unique_ptr<ServerManager>&& server_manager) {
     server_manager->m_system.RunServer(std::move(server_manager));
+}
+
+void ServerManager::StartDeferralPolling(std::chrono::milliseconds interval) {
+    ASSERT(m_deferral_event != nullptr && !m_deferral_thread.joinable());
+    ASSERT(interval.count() > 0);
+    m_deferral_thread = m_system.Kernel().RunOnHostCoreThread("ServicePoll", [this, interval] {
+        const auto token = m_stop_source.get_token();
+        while (Common::StoppableTimedWait(token, interval)) {
+            bool pending;
+            {
+                std::scoped_lock lk{m_deferred_list_mutex};
+                pending = !m_deferred_sessions.empty();
+            }
+            if (pending) {
+                m_deferral_event->Signal(m_system.Kernel());
+            }
+        }
+    });
 }
 
 Result ServerManager::RegisterSession(Kernel::KServerSession* server_session,

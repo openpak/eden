@@ -350,10 +350,14 @@ void SFDNSRES::GetHostByNameRequestWithOptions(HLERequestContext& ctx) {
     });
 }
 
-static std::vector<u8> SerializeAddrInfo(const std::vector<Network::AddrInfo>& vec,
+std::vector<u8> SerializeAddrInfo(const std::vector<Network::AddrInfo>& vec,
                                          std::string_view host) {
     // Adapted from
     // https://github.com/switchbrew/libnx/blob/c5a9a909a91657a9818a3b7e18c9b91ff0cbb6e3/nx/source/runtime/resolver.c#L190
+    // The resolver wire format contains a 16-byte IPv4 sockaddr. Eden's SockAddrIn
+    // is a 256-byte storage container; advertising its size makes the guest copy
+    // past this record and can overflow gRPC's 128-byte resolved-address buffer.
+    constexpr u8 ipv4_address_size = 16;
     std::vector<u8> data;
 
     for (const Network::AddrInfo& addrinfo : vec) {
@@ -363,18 +367,10 @@ static std::vector<u8> SerializeAddrInfo(const std::vector<Network::AddrInfo>& v
         Append<u32_be>(data, static_cast<u32>(Translate(addrinfo.family)));      // ai_family
         Append<u32_be>(data, static_cast<u32>(Translate(addrinfo.socket_type))); // ai_socktype
         Append<u32_be>(data, static_cast<u32>(Translate(addrinfo.protocol)));    // ai_protocol
-        Append<u32_be>(data, sizeof(SockAddrIn)); // ai_addrlen
+        Append<u32_be>(data, ipv4_address_size);                              // ai_addrlen
 
-        // ai_addr: a BSD sockaddr_in, the SockAddrIn struct in sockets.h --
-        // {u8 sin_len; u8 sin_family; u16 sin_port; u8 sin_addr[4]; u8 sin_zero[8];}.
-        //
-        // [OpenPak] sin_len is its own byte and must carry the full sockaddr size. Writing
-        // sin_family as one 2-byte big-endian value folds sin_len away as an implicit zero, and
-        // a gRPC title -- NPLN is gRPC -- builds its own connect() sockaddr straight out of this
-        // buffer: off a sin_len of 0 it reads the address and port out of the wrong offsets and
-        // dials a port nobody is listening on, so the connection never completes and the title
-        // sits on its transport deadline. Citron and Ryujinx both had to fix the same byte.
-        Append<u8>(data, static_cast<u8>(sizeof(SockAddrIn)));              // sin_len
+        // ai_addr: {sin_len, sin_family, sin_port, sin_addr[4], sin_zero[8]}.
+        Append<u8>(data, ipv4_address_size);                              // sin_len
         Append<u8>(data, static_cast<u8>(Translate(addrinfo.addr.family))); // sin_family
         // On the Switch, the following fields are passed through htonl despite
         // already being big-endian, so they end up as little-endian.
