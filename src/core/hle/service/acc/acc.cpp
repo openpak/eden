@@ -51,7 +51,7 @@ constexpr std::size_t THUMBNAIL_SIZE = 0x24000;
 // online play must not race a sign-in, and the chain answers in well under a second on a server
 // that is there. When it is not, this returns nothing and the caller keeps the old stub, which
 // is a console that is simply not online.
-static bool OpenPakSignedIn() {
+static bool OpenPakSignedIn(Core::System& system) {
     if (!Settings::values.enable_openpak.GetValue()) {
         return false;
     }
@@ -71,11 +71,30 @@ static bool OpenPakSignedIn() {
         void(openpak::client::profile::Refresh({}, "switch"));
     });
 
+    // [OpenPak] Bind the login to the asking title first. A console's baas login carries an
+    // application_auth_token naming the running game, and the game's own online stack checks
+    // that binding before it will use the id_token: one minted for no title in particular
+    // connects to the servers and then never opens a session, which reads as a hang.
+    const u64 program_id = system.GetApplicationProcessProgramID();
+    if (program_id != 0) {
+        std::string version;
+
+        const auto [nacp, icon] = FileSys::PatchManager{
+            program_id, system.GetFileSystemController(), system.GetContentProvider()}
+                                      .GetControlMetadata();
+        if (nacp) {
+            version = nacp->GetVersionString();
+        }
+
+        openpak::client::session::SetApplication(fmt::format("{:016x}", program_id),
+                                                 std::move(version));
+    }
+
     return openpak::client::session::Ensure();
 }
 
-static std::vector<u8> OpenPakIdTokenBytes() {
-    if (!OpenPakSignedIn()) {
+static std::vector<u8> OpenPakIdTokenBytes(Core::System& system) {
+    if (!OpenPakSignedIn(system)) {
         return {};
     }
 
@@ -552,7 +571,7 @@ protected:
     }
 
     void LoadIdTokenCache(HLERequestContext& ctx) {
-        std::vector<u8> token_data = OpenPakIdTokenBytes();
+        std::vector<u8> token_data = OpenPakIdTokenBytes(system);
 
         if (token_data.empty()) {
             LOG_WARNING(Service_ACC, "(STUBBED) called");
@@ -774,7 +793,7 @@ private:
         // [OpenPak] The network service account id has to be the one the id_token was issued for,
         // or a title asks a server about a player nobody has heard of. The local profile hash is
         // what stands in when there is no OpenPak identity.
-        const u64 nsa_id = OpenPakSignedIn()
+        const u64 nsa_id = OpenPakSignedIn(system)
                                ? openpak::client::session::NetworkServiceAccountId()
                                : 0;
 
@@ -802,7 +821,7 @@ private:
         // command 4); the other one in this file serves a different interface. A title handed
         // 0x100 zero bytes here throws where it parses them: Stardew aborts with 2162-0001
         // before it opens a single socket.
-        std::vector<u8> token_data = OpenPakIdTokenBytes();
+        std::vector<u8> token_data = OpenPakIdTokenBytes(system);
 
         if (token_data.empty()) {
             LOG_WARNING(Service_ACC, "(STUBBED) called");

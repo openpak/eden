@@ -7,7 +7,11 @@
 
 #include <atomic>
 
+#include <chrono>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <span>
 #include <vector>
 #include <variant>
@@ -52,6 +56,11 @@ private:
         // [OpenPak] Non-null makes this an event fd: the counter a read returns and clears, with
         // the socket above serving only to make it pollable.
         std::shared_ptr<std::atomic<u64>> event_value;
+        // [OpenPak] Options the set side tolerated but never applied, keyed by level and
+        // optname. A title's network stack (NPLN's gRPC above all) sets an option and reads it
+        // straight back before trusting the socket: a set that answers SUCCESS and a get that
+        // answers NOPROTOOPT reads as a broken socket, and the whole connection is abandoned.
+        std::map<u64, std::vector<u8>> feigned_sockopts;
     };
 
     struct PollWork {
@@ -146,6 +155,8 @@ private:
     void Listen(HLERequestContext& ctx);
     void Fcntl(HLERequestContext& ctx);
     void SetSockOpt(HLERequestContext& ctx);
+    void RecvMMsg(HLERequestContext& ctx);
+    void SendMMsg(HLERequestContext& ctx);
     void Shutdown(HLERequestContext& ctx);
     void Recv(HLERequestContext& ctx);
     void RecvFrom(HLERequestContext& ctx);
@@ -181,6 +192,17 @@ private:
 
     s32 FindFreeFileDescriptorHandle() noexcept;
     bool IsFileDescriptorValid(s32 fd) const noexcept;
+
+    bool PollSetIncludesEventFd(std::span<const u8> read_buffer, s32 nfds) const;
+
+    /// [OpenPak] A deferred Poll's captured request: the pollfd bytes as they were read, and
+    /// the deadline a bounded wait must not silently outlive.
+    struct DeferredPollState {
+        std::vector<u8> read_buffer;
+        std::optional<std::chrono::steady_clock::time_point> deadline;
+    };
+    std::mutex deferred_poll_snapshot_mutex;
+    std::map<const HLERequestContext*, DeferredPollState> deferred_poll_snapshots;
 
     void BuildErrnoResponse(HLERequestContext& ctx, Errno bsd_errno) const noexcept;
 

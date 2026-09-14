@@ -128,6 +128,11 @@ public:
 
     Errno Initialize(Domain domain, Type type, Protocol protocol) override;
 
+    /// The family this socket was created with: a v6 socket wants its v4 addresses mapped.
+    [[nodiscard]] Domain GetDomain() const {
+        return domain;
+    }
+
     Errno Close() override;
 
     std::pair<AcceptResult, Errno> Accept() override;
@@ -198,6 +203,7 @@ public:
 
 private:
     bool is_non_blocking = false;
+    Domain domain = Domain::Unspecified;
 };
 
 std::pair<s32, Errno> Poll(std::vector<PollFD>& poll_fds, s32 timeout);
