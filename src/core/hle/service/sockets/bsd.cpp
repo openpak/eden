@@ -1068,6 +1068,16 @@ std::pair<s32, Errno> BSD_USA::PollImpl(std::vector<u8>& write_buffer, std::span
             asked += fmt::format(" {}:{:#x}", pollfd.fd, static_cast<u16>(pollfd.events));
         }
         LOG_DEBUG(Service, "Poll asking{} timeout={}", asked, timeout);
+        // [OpenPak] The NPLN SDK re-verifies the returned array against a mask cached in its
+        // TLS; a round-trip that alters the bytes makes it take its error path and stall.
+        // Log the returned array verbatim so a freeze can be compared against the request.
+        std::string returned;
+        for (const PollFD& pollfd : fds) {
+            returned += fmt::format(" fd={} e={:#x} r={:#x} |", pollfd.fd,
+                                    static_cast<u16>(pollfd.events),
+                                    static_cast<u16>(pollfd.revents));
+        }
+        LOG_DEBUG(Service, "Poll answered:{} (timeout={})", returned, timeout);
     }
 
     // [OpenPak] An event fd is answered from its counter, never from the host. It used to carry
@@ -1225,6 +1235,75 @@ Errno BSD_USA::BindImpl(s32 fd, std::span<const u8> addr) {
     return Translate(file_descriptors[fd]->socket->Bind(Translate(addr_in)));
 }
 
+/// [OpenPak] Whether this address is the OpenPak server itself: the address every redirected
+/// name resolves to, in either family's spelling. Those are ours, they are TCP, and they are
+/// the ones a title's gRPC stack (NPLN above all) dials.
+static bool OpenPakServerTarget(const Network::SockAddrIn& addr) {
+    if (!Settings::values.enable_openpak.GetValue()) {
+        return false;
+    }
+
+    std::string ip = Settings::values.openpak_server_ip.GetValue();
+    if (ip.empty()) {
+        if (const char* env = std::getenv("OPENPAK_SERVER_IP"); env != nullptr && *env != '\0') {
+            ip = env;
+        }
+    }
+    if (ip.empty()) {
+        return false;
+    }
+
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (std::sscanf(ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) {
+        return false;
+    }
+
+    return addr.ip[0] == (a & 0xff) && addr.ip[1] == (b & 0xff) && addr.ip[2] == (c & 0xff) &&
+           addr.ip[3] == (d & 0xff);
+}
+
+/// [OpenPak] A title's gRPC stack creates its first call while the channel is still connecting
+/// and then polls the socket with a zero event mask -- which can never report POLLOUT -- so a
+/// connect(2) answered EINPROGRESS leaves the completion undeliverable and the title waits
+/// forever. Complete the connect synchronously instead: wait out the host's ~10 ms connect and
+/// answer SUCCESS, which is what the working Ryujinx build does (its
+/// NEXTENDO_GRPC_CONNECT_SYNC repair) and what the title's own poll then reads as an already-
+/// established socket. Scoped to connects aimed at the OpenPak server, and only when the wait
+/// actually completes within the budget; everything else keeps EINPROGRESS.
+static Errno CompleteConnectSync(Network::SocketBase& socket,
+                                 const Network::SockAddrIn& addr, Errno result) {
+    if (result != Errno::INPROGRESS || !OpenPakServerTarget(addr)) {
+        return result;
+    }
+
+    const auto fd = socket.GetFD();
+    bool writable = false;
+#ifdef _WIN32
+    WSAPOLLFD pollfd{};
+    pollfd.fd = fd;
+    pollfd.events = POLLOUT;
+    writable = WSAPoll(&pollfd, 1, 2000) == 1 && (pollfd.revents & (POLLOUT | POLLERR | POLLHUP));
+#else
+    pollfd pollfd{};
+    pollfd.fd = fd;
+    pollfd.events = POLLOUT;
+    writable = ::poll(&pollfd, 1, 2000) == 1 && (pollfd.revents & (POLLOUT | POLLERR | POLLHUP));
+#endif
+    if (!writable) {
+        return result;
+    }
+
+    const auto [pending_err, getsockopt_err] = socket.GetPendingError();
+    if (getsockopt_err != Network::Errno::SUCCESS || pending_err != Network::Errno::SUCCESS) {
+        return result;
+    }
+
+    LOG_INFO(Service,
+             "[OpenPak] Connect to the OpenPak server completed synchronously; the channel is "
+             "READY before the title's first call");
+    return Errno::SUCCESS;
+}
+
 Errno BSD_USA::ConnectImpl(s32 fd, std::span<const u8> addr) {
     if (!IsFileDescriptorValid(fd)) {
         return Errno::BADF;
@@ -1246,7 +1325,8 @@ Errno BSD_USA::ConnectImpl(s32 fd, std::span<const u8> addr) {
         mapped.portno = static_cast<u16>(addr[2] << 8 | addr[3]);
         std::memcpy(mapped.ip.data(), addr.data() + 20, mapped.ip.size());
 
-        const Errno result = Translate(file_descriptors[fd]->socket->Connect(mapped));
+        Errno result = Translate(file_descriptors[fd]->socket->Connect(mapped));
+        result = CompleteConnectSync(*file_descriptors[fd]->socket, mapped, result);
 
         LOG_DEBUG(Service,
                   "[OpenPak] Connect fd={} -> [v6 mapped] {}.{}.{}.{}:{} -> errno {}", fd,
@@ -1261,7 +1341,8 @@ Errno BSD_USA::ConnectImpl(s32 fd, std::span<const u8> addr) {
 
     auto addr_in = GetValue<SockAddrIn>(addr);
 
-    const Errno result = Translate(file_descriptors[fd]->socket->Connect(Translate(addr_in)));
+    Errno result = Translate(file_descriptors[fd]->socket->Connect(Translate(addr_in)));
+    result = CompleteConnectSync(*file_descriptors[fd]->socket, Translate(addr_in), result);
 
     // [OpenPak] Where a connection went and whether it took: a title dialling the wrong address
     // and one dialling the right address and being refused look identical without this.
