@@ -4,6 +4,11 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <thread>
+
+#include "core/core.h"
+#include "core/hle/kernel/k_event.h"
 #include "core/hle/service/server_manager.h"
 #include "core/hle/service/sockets/bsd.h"
 #include "core/hle/service/sockets/nsd.h"
@@ -79,7 +84,29 @@ void LoopProcess(Core::System& system) {
     server_manager->RegisterNamedService("eth:nd", std::make_shared<ISfDriverServiceCreator>(system));
 
     server_manager->StartAdditionalHostThreads("bsdsocket", 2);
+
+    // [OpenPak] The deferred-poll machinery: one event BSD::Poll waits on instead of holding a
+    // worker thread, signalled by the eventfd Write path. No timer heartbeat: the drain in
+    // PollImpl consumes each wakeup exactly once, so every deferral event signal corresponds to
+    // real new state, and a timer here only pegs the shared socket-service thread with
+    // re-checks between them.
+    Kernel::KEvent* deferral_event{};
+    server_manager->ManageDeferral(&deferral_event);
+    SetBsdDeferralEvent(deferral_event);
+
     ServerManager::RunServer(std::move(server_manager));
+}
+
+namespace {
+Kernel::KEvent* g_bsd_deferral_event = nullptr;
+} // namespace
+
+void SetBsdDeferralEvent(Kernel::KEvent* event) {
+    g_bsd_deferral_event = event;
+}
+
+Kernel::KEvent* GetBsdDeferralEvent() {
+    return g_bsd_deferral_event;
 }
 
 } // namespace Service::Sockets

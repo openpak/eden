@@ -4,10 +4,19 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
+
+#ifndef _WIN32
+#include <poll.h>
+#endif
 
 #include <fmt/ranges.h>
 
@@ -217,10 +226,94 @@ void BSD_USA::Poll(HLERequestContext& ctx) {
 
     LOG_DEBUG(Service, "called. nfds={} timeout={}", nfds, timeout);
 
+    // [OpenPak] The deferred poll. gRPC parks a thread in Poll() with its wakeup eventfd in the
+    // set and expects a *different* guest thread's eventfd Write() to end the wait -- a wait
+    // answered synchronously here would hold this worker thread, and the Write() IPC would
+    // queue behind the very wait it is meant to end. Instead: one non-blocking pass now, and if
+    // nothing is ready yet, give the thread up (SetIsDeferred) and let the deferral event's
+    // heartbeat re-run this handler until something genuinely is. Measured as the one repair
+    // that carries a working Stardew online session on the Nextendo builds.
+    std::vector<u8> read_buffer;
+    bool had_snapshot = false;
+    std::optional<std::chrono::steady_clock::time_point> existing_deadline;
+    {
+        std::scoped_lock snapshot_lock{deferred_poll_snapshot_mutex};
+        if (const auto it = deferred_poll_snapshots.find(&ctx); it != deferred_poll_snapshots.end()) {
+            read_buffer = it->second.read_buffer;
+            existing_deadline = it->second.deadline;
+            had_snapshot = true;
+        }
+    }
+    if (!had_snapshot) {
+        const auto live_buffer = ctx.ReadBuffer();
+        read_buffer.assign(live_buffer.begin(), live_buffer.end());
+    }
+
+    if (timeout != 0 && GetBsdDeferralEvent() != nullptr &&
+        PollSetIncludesEventFd(read_buffer, nfds)) {
+        std::vector<u8> write_buffer(ctx.GetWriteBufferSize());
+        auto [ret, bsd_errno] = PollImpl(write_buffer, read_buffer, nfds, /*timeout=*/0);
+
+        // A bounded wait whose deadline passed answers ETIMEDOUT, exactly like a real poll()
+        // once its time is up, instead of deferring forever.
+        if (ret == 0 && bsd_errno == Errno::SUCCESS && existing_deadline &&
+            std::chrono::steady_clock::now() >= *existing_deadline) {
+            std::scoped_lock snapshot_lock{deferred_poll_snapshot_mutex};
+            deferred_poll_snapshots.erase(&ctx);
+            if (write_buffer.size() > 0) {
+                ctx.WriteBuffer(write_buffer);
+            }
+            IPC::ResponseBuilder rb{ctx, 4};
+            rb.Push(ResultSuccess);
+            rb.Push<s32>(0);
+            rb.PushEnum(Errno::TIMEDOUT);
+            return;
+        }
+
+        if (ret == 0 && bsd_errno == Errno::SUCCESS) {
+            // Nothing ready yet -- give up this thread rather than block it. ServerManager
+            // re-invokes this handler when the deferral event fires, reading the snapshot
+            // rather than guest memory another IPC may since have reused.
+            if (!had_snapshot) {
+                std::scoped_lock snapshot_lock{deferred_poll_snapshot_mutex};
+                const auto deadline =
+                    timeout == -1
+                        ? std::optional<std::chrono::steady_clock::time_point>{}
+                        : std::optional{std::chrono::steady_clock::now() +
+                                        std::chrono::milliseconds(timeout)};
+                deferred_poll_snapshots[&ctx] = DeferredPollState{read_buffer, deadline};
+            }
+            LOG_DEBUG(Service, "[OpenPak] Poll deferred (nfds={} timeout={}), eventfd in set",
+                      nfds, timeout);
+            ctx.SetIsDeferred();
+            return;
+        }
+        // Something to report (or an error): drop any snapshot and answer now, with the same
+        // shape an ordinary Poll reply has.
+        if (had_snapshot) {
+            std::scoped_lock snapshot_lock{deferred_poll_snapshot_mutex};
+            deferred_poll_snapshots.erase(&ctx);
+        }
+        if (write_buffer.size() > 0) {
+            ctx.WriteBuffer(write_buffer);
+        }
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(ResultSuccess);
+        rb.Push<s32>(ret);
+        rb.PushEnum(bsd_errno);
+        return;
+    }
+
+    // Not taking the deferred path -- no stale snapshot may linger under this ctx.
+    if (had_snapshot) {
+        std::scoped_lock snapshot_lock{deferred_poll_snapshot_mutex};
+        deferred_poll_snapshots.erase(&ctx);
+    }
+
     ExecuteWork(ctx, PollWork{
                          .nfds = nfds,
                          .timeout = timeout,
-                         .read_buffer = ctx.ReadBuffer(),
+                         .read_buffer = read_buffer,
                          .write_buffer = std::vector<u8>(ctx.GetWriteBufferSize()),
                      });
 }
@@ -353,6 +446,279 @@ void BSD_USA::SetSockOpt(HLERequestContext& ctx) {
               static_cast<u32>(optname), optval.size());
 
     BuildErrnoResponse(ctx, SetSockOptImpl(fd, level, optname, optval));
+}
+
+
+// [OpenPak] sendmmsg/recvmmsg, the scatter-gather send a gRPC title uses for every frame it
+// writes. NPLN is gRPC, so leaving these unimplemented meant the title panicked (2010-0212) the
+// moment its TCP connection came up and it tried to write the first TLS record: the connection
+// was fine, there was simply no way to put bytes on it.
+//
+// The buffer is a receive descriptor the guest hands over already filled in: a leading byte
+// Nintendo itself ignores, then one packed msghdr per message --
+//   u32 name_len, name bytes, u32 iov_count, {u64 iov_len, iov bytes}*, u32 control_len,
+//   control bytes, u32 flags, u32 length
+// -- and the same layout is written back with each message's length set to what was transferred.
+namespace {
+
+struct MMsgHdr {
+    std::vector<u8> name;
+    std::vector<std::vector<u8>> iov;
+    std::vector<u8> control;
+    u32 flags{};
+    u32 length{};
+};
+
+bool Take(std::span<const u8>& data, void* out, size_t size) {
+    if (data.size() < size) {
+        return false;
+    }
+    std::memcpy(out, data.data(), size);
+    data = data.subspan(size);
+    return true;
+}
+
+bool TakeBytes(std::span<const u8>& data, std::vector<u8>& out, size_t size) {
+    if (data.size() < size) {
+        return false;
+    }
+    out.assign(data.begin(), data.begin() + size);
+    data = data.subspan(size);
+    return true;
+}
+
+bool DeserializeMMsg(std::vector<MMsgHdr>& out, std::span<const u8> data, s32 vlen) {
+    if (vlen < 0 || data.empty()) {
+        return false;
+    }
+    data = data.subspan(1); // the header byte hardware ignores
+
+    out.resize(static_cast<size_t>(vlen));
+    for (MMsgHdr& msg : out) {
+        u32 name_len{};
+        if (!Take(data, &name_len, sizeof(name_len)) || !TakeBytes(data, msg.name, name_len)) {
+            return false;
+        }
+        u32 iov_count{};
+        if (!Take(data, &iov_count, sizeof(iov_count))) {
+            return false;
+        }
+        msg.iov.resize(iov_count);
+        for (std::vector<u8>& iov : msg.iov) {
+            u64 iov_len{};
+            if (!Take(data, &iov_len, sizeof(iov_len)) ||
+                !TakeBytes(data, iov, static_cast<size_t>(iov_len))) {
+                return false;
+            }
+        }
+        u32 control_len{};
+        if (!Take(data, &control_len, sizeof(control_len)) ||
+            !TakeBytes(data, msg.control, control_len)) {
+            return false;
+        }
+        if (!Take(data, &msg.flags, sizeof(msg.flags)) ||
+            !Take(data, &msg.length, sizeof(msg.length))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void Put(std::vector<u8>& out, const void* value, size_t size) {
+    const auto* bytes = static_cast<const u8*>(value);
+    out.insert(out.end(), bytes, bytes + size);
+}
+
+std::vector<u8> SerializeMMsg(const std::vector<MMsgHdr>& msgs) {
+    std::vector<u8> out;
+    out.push_back(8); // what hardware writes back here
+    for (const MMsgHdr& msg : msgs) {
+        const u32 name_len = static_cast<u32>(msg.name.size());
+        Put(out, &name_len, sizeof(name_len));
+        out.insert(out.end(), msg.name.begin(), msg.name.end());
+
+        const u32 iov_count = static_cast<u32>(msg.iov.size());
+        Put(out, &iov_count, sizeof(iov_count));
+        for (const std::vector<u8>& iov : msg.iov) {
+            const u64 iov_len = iov.size();
+            Put(out, &iov_len, sizeof(iov_len));
+            out.insert(out.end(), iov.begin(), iov.end());
+        }
+
+        const u32 control_len = static_cast<u32>(msg.control.size());
+        Put(out, &control_len, sizeof(control_len));
+        out.insert(out.end(), msg.control.begin(), msg.control.end());
+
+        Put(out, &msg.flags, sizeof(msg.flags));
+        Put(out, &msg.length, sizeof(msg.length));
+    }
+    return out;
+}
+
+/// Spread the byte count a single send/recv moved back over the messages it covered, and answer
+/// with how many messages it reached. A message that is only partly filled still counts: a
+/// stream read almost never fills the room offered, and answering "none" for 2214 bytes into an
+/// 8 KiB buffer tells the caller nothing arrived.
+s32 SpreadTransferred(std::vector<MMsgHdr>& msgs, size_t transferred) {
+    if (transferred == 0) {
+        return 0;
+    }
+
+    size_t index = 0;
+    size_t left = transferred;
+
+    while (left > 0 && index < msgs.size()) {
+        MMsgHdr& msg = msgs[index];
+
+        size_t capacity = 0;
+        for (const std::vector<u8>& iov : msg.iov) {
+            capacity += iov.size();
+        }
+
+        size_t stored;
+        if (left > capacity) {
+            stored = capacity;
+            ++index;
+        } else {
+            stored = left;
+        }
+
+        msg.length = static_cast<u32>(stored);
+        left -= stored;
+    }
+
+    return static_cast<s32>((std::min)(index + 1, msgs.size()));
+}
+
+/// The opening bytes of a payload, so a handshake that is refused can be read back rather than
+/// guessed at: a TLS record says its type and version in the first five bytes.
+std::string HexHead(std::span<const u8> data, size_t count = 48) {
+    std::string out;
+    for (size_t i = 0; i < (std::min)(count, data.size()); ++i) {
+        out += fmt::format("{:02x}", data[i]);
+    }
+    return out;
+}
+
+/// A named or control-carrying message is a datagram shape this cannot express as one stream
+/// send; hardware titles only use the plain form, so say so rather than send the wrong bytes.
+bool IsPlain(const std::vector<MMsgHdr>& msgs) {
+    return std::all_of(msgs.begin(), msgs.end(), [](const MMsgHdr& msg) {
+        return msg.name.empty() && msg.control.empty();
+    });
+}
+
+} // Anonymous namespace
+
+void BSD_USA::SendMMsg(HLERequestContext& ctx) {
+    IPC::RequestParser rp{ctx};
+    const s32 fd = rp.Pop<s32>();
+    const s32 vlen = rp.Pop<s32>();
+    const u32 flags = rp.Pop<u32>();
+
+    std::vector<MMsgHdr> msgs;
+    if (!DeserializeMMsg(msgs, ctx.ReadBufferB(), vlen)) {
+        LOG_ERROR(Service, "SendMMsg fd={} vlen={}: malformed message buffer", fd, vlen);
+        BuildErrnoResponse(ctx, Errno::INVAL);
+        return;
+    }
+    if (!IsPlain(msgs)) {
+        LOG_WARNING(Service, "SendMMsg fd={} vlen={}: named or control message", fd, vlen);
+        BuildErrnoResponse(ctx, Errno::NOPROTOOPT);
+        return;
+    }
+
+    std::vector<u8> payload;
+    for (const MMsgHdr& msg : msgs) {
+        for (const std::vector<u8>& iov : msg.iov) {
+            payload.insert(payload.end(), iov.begin(), iov.end());
+        }
+    }
+
+    s32 sent = 0;
+    Errno bsd_errno = Errno::SUCCESS;
+    if (!payload.empty()) {
+        std::tie(sent, bsd_errno) = SendImpl(fd, flags, payload);
+    }
+
+    LOG_DEBUG(Service, "SendMMsg fd={} vlen={} bytes={} -> {} errno {} head={}", fd, vlen,
+              payload.size(), sent, static_cast<u32>(bsd_errno), HexHead(payload));
+
+    s32 ret = -1;
+    if (bsd_errno == Errno::SUCCESS) {
+        ret = SpreadTransferred(msgs, static_cast<size_t>((std::max)(sent, 0)));
+        const std::vector<u8> written = SerializeMMsg(msgs);
+        ctx.WriteBufferB(written.data(), written.size());
+    }
+
+    IPC::ResponseBuilder rb{ctx, 4};
+    rb.Push(ResultSuccess);
+    rb.Push<s32>(ret);
+    rb.PushEnum(bsd_errno);
+}
+
+void BSD_USA::RecvMMsg(HLERequestContext& ctx) {
+    IPC::RequestParser rp{ctx};
+    const s32 fd = rp.Pop<s32>();
+    const s32 vlen = rp.Pop<s32>();
+    const u32 flags = rp.Pop<u32>();
+
+    std::vector<MMsgHdr> msgs;
+    if (!DeserializeMMsg(msgs, ctx.ReadBufferB(), vlen)) {
+        LOG_ERROR(Service, "RecvMMsg fd={} vlen={}: malformed message buffer", fd, vlen);
+        BuildErrnoResponse(ctx, Errno::INVAL);
+        return;
+    }
+    if (!IsPlain(msgs)) {
+        LOG_WARNING(Service, "RecvMMsg fd={} vlen={}: named or control message", fd, vlen);
+        BuildErrnoResponse(ctx, Errno::NOPROTOOPT);
+        return;
+    }
+
+    size_t capacity = 0;
+    for (const MMsgHdr& msg : msgs) {
+        for (const std::vector<u8>& iov : msg.iov) {
+            capacity += iov.size();
+        }
+    }
+
+    std::vector<u8> buffer(capacity);
+    s32 received = 0;
+    Errno bsd_errno = Errno::SUCCESS;
+    if (capacity > 0) {
+        std::tie(received, bsd_errno) = RecvImpl(fd, flags, buffer);
+    }
+
+    LOG_DEBUG(Service, "RecvMMsg fd={} vlen={} room={} -> {} errno {} head={}", fd, vlen, capacity,
+              received, static_cast<u32>(bsd_errno),
+              HexHead({buffer.data(), static_cast<size_t>((std::max)(received, 0))}));
+
+    s32 ret = -1;
+    if (bsd_errno == Errno::SUCCESS) {
+        size_t offset = 0;
+        for (MMsgHdr& msg : msgs) {
+            for (std::vector<u8>& iov : msg.iov) {
+                const size_t take =
+                    (std::min)(iov.size(), static_cast<size_t>((std::max)(received, 0)) - offset);
+                std::memcpy(iov.data(), buffer.data() + offset, take);
+                offset += take;
+                if (offset >= static_cast<size_t>((std::max)(received, 0))) {
+                    break;
+                }
+            }
+            if (offset >= static_cast<size_t>((std::max)(received, 0))) {
+                break;
+            }
+        }
+        ret = SpreadTransferred(msgs, static_cast<size_t>((std::max)(received, 0)));
+        const std::vector<u8> written = SerializeMMsg(msgs);
+        ctx.WriteBufferB(written.data(), written.size());
+    }
+
+    IPC::ResponseBuilder rb{ctx, 4};
+    rb.Push(ResultSuccess);
+    rb.Push<s32>(ret);
+    rb.PushEnum(bsd_errno);
 }
 
 void BSD_USA::Shutdown(HLERequestContext& ctx) {
@@ -523,11 +889,16 @@ void BSD_USA::DuplicateSocket(HLERequestContext& ctx) {
 // of descriptor. The counter semantics of a real eventfd are approximated by one datagram per
 // write, which is all a wakeup needs.
 void BSD_USA::EventFd(HLERequestContext& ctx) {
+    // EventFd(nn::socket::EventFdFlags flags, u64 initval). Flags come first, then four bytes of
+    // padding before the 64-bit initial value -- read the other way round the counter starts at
+    // whatever the flags were and the flags are lost, so every event fd a title creates is born
+    // already signalled and its poller is woken for work that was never queued.
     IPC::RequestParser rp{ctx};
-    const u64 initval = rp.Pop<u64>();
     const u32 flags = rp.Pop<u32>();
+    rp.Pop<u32>(); // padding
+    const u64 initval = rp.Pop<u64>();
 
-    LOG_DEBUG(Service, "called. initval={}, flags={}", initval, flags);
+    LOG_DEBUG(Service, "called. flags={}, initval={}", flags, initval);
 
     const s32 fd = FindFreeFileDescriptorHandle();
     if (fd < 0) {
@@ -569,14 +940,6 @@ void BSD_USA::EventFd(HLERequestContext& ctx) {
 
     descriptor.event_value = std::make_shared<std::atomic<u64>>(initval);
 
-    // One byte, not one per count: the byte only makes poll() say "readable", and the value the
-    // guest reads comes from the counter. A real event fd answers a read with the whole count at
-    // once and resets; handing out one wakeup per unit instead tells a title six things happened
-    // when one did, and Pia's accounting never recovers from that.
-    if (initval > 0) {
-        const u8 wake = 1;
-        void(socket->Send(std::span<const u8>{&wake, 1}, 0));
-    }
 
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
@@ -634,6 +997,24 @@ std::pair<s32, Errno> BSD_USA::SocketImpl(Domain domain, Type type, Protocol pro
     return {fd, Errno::SUCCESS};
 }
 
+bool BSD_USA::PollSetIncludesEventFd(std::span<const u8> read_buffer, s32 nfds) const {
+    if (nfds <= 0 || read_buffer.size() < static_cast<size_t>(nfds) * sizeof(PollFD)) {
+        return false;
+    }
+    std::vector<PollFD> fds(nfds);
+    std::memcpy(fds.data(), read_buffer.data(), nfds * sizeof(PollFD));
+    for (const PollFD& pollfd : fds) {
+        if (pollfd.fd < 0 || pollfd.fd > static_cast<s32>(MAX_FD)) {
+            continue;
+        }
+        const auto& descriptor = file_descriptors[pollfd.fd];
+        if (descriptor && descriptor->event_value) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::pair<s32, Errno> BSD_USA::PollImpl(std::vector<u8>& write_buffer, std::span<const u8> read_buffer,
                                     s32 nfds, s32 timeout) {
     if (nfds <= 0) {
@@ -681,31 +1062,124 @@ std::pair<s32, Errno> BSD_USA::PollImpl(std::vector<u8>& write_buffer, std::span
         }
     }
 
-    std::vector<Network::PollFD> host_pollfds(fds.size());
-    std::transform(fds.begin(), fds.end(), host_pollfds.begin(), [](PollFD pollfd) {
-        Network::PollFD result;
-        result.socket = file_descriptors[pollfd.fd]->socket.get();
-        result.events = Translate(pollfd.events);
-        result.revents = Network::PollEvents{};
-        return result;
-    });
+    {
+        std::string asked;
+        for (const PollFD& pollfd : fds) {
+            asked += fmt::format(" {}:{:#x}", pollfd.fd, static_cast<u16>(pollfd.events));
+        }
+        LOG_DEBUG(Service, "Poll asking{} timeout={}", asked, timeout);
+    }
 
-    // [OpenPak] An infinite poll is served in slices. The Bsd service has one thread, so a poll
-    // that blocks forever parks the very thread that would have to process the event ending the
-    // wait -- including the guest's own eventfd write. Pia polls a single fd with timeout=-1 while
-    // it sets up a session, and a title that waits there never comes back. Returning "nothing
-    // ready yet" is a legitimate poll result the caller already handles by asking again.
+    // [OpenPak] An event fd is answered from its counter, never from the host. It used to carry
+    // a byte on a loopback socket purely to make host poll() say "readable", with the counter
+    // kept alongside -- and the two drift apart in both directions: a send that fails raises the
+    // counter with no byte, so the wakeup is lost for good, and a read of a zero counter left a
+    // stale byte behind, so poll() reported readable forever. A lost wakeup is a title that
+    // queued work and never wrote it: gRPC kicks its poller this way, which is why NPLN sat on
+    // an established connection without ever opening a stream. The counter is the whole truth.
+    std::vector<Network::PollFD> host_pollfds;
+    std::vector<size_t> host_of(fds.size(), std::numeric_limits<size_t>::max());
+    s32 events_ready = 0;
+
+    for (size_t i = 0; i < fds.size(); ++i) {
+        const FileDescriptor& descriptor = *file_descriptors[fds[i].fd];
+
+        if (descriptor.event_value) {
+            // A title's gRPC stack polls its wakeup event fd with a zero event mask -- valid
+            // POSIX, "only tell me about errors" -- yet expects readability to be reported once
+            // it writes that event fd. Taking the zero mask literally parks gRPC's wakeup loop
+            // forever, and queued work (the first NPLN RPC above all) never runs.
+            const bool wants_in = True(fds[i].events & PollEvents::In) ||
+                                  fds[i].events == PollEvents{};
+            const bool readable = descriptor.event_value->load() > 0 && wants_in;
+            fds[i].revents = readable ? PollEvents::In : PollEvents{};
+            if (readable) {
+                ++events_ready;
+                // Poll only observes readiness. The subsequent event fd read consumes the
+                // counter; clearing it here makes that read fail with AGAIN and loses the wakeup.
+            }
+            continue;
+        }
+
+        host_of[i] = host_pollfds.size();
+
+        Network::PollFD& host = host_pollfds.emplace_back();
+        host.socket = descriptor.socket.get();
+        host.events = Translate(fds[i].events);
+        host.revents = Network::PollEvents{};
+    }
+
+    // [OpenPak] A poll that was asked to wait forever waits forever. It is served in slices only
+    // so that shutdown stays responsive -- the slice is never reported to the guest as a result.
+    // Answering "nothing ready" to a caller that asked for -1 is a lie poll(2) never tells, and a
+    // gRPC title believes it: the transport treats the wakeup as spurious, leaves its queued work
+    // queued, and the connection sits established without ever opening a stream.
     constexpr s32 InfinitePollSliceMs = 250;
-    const auto result =
-        Network::Poll(host_pollfds, timeout < 0 ? InfinitePollSliceMs : timeout);
 
-    const size_t num = host_pollfds.size();
-    for (size_t i = 0; i < num; ++i) {
-        fds[i].revents = Translate(host_pollfds[i].revents);
+    // Re-read the event fd counters. They are answered from the counter rather than by the host,
+    // so a wait that only re-polls the host descriptors would never notice one being signalled --
+    // and the eventfd is precisely how a gRPC poller is woken.
+    const auto recheck_events = [&fds, &events_ready]() {
+        events_ready = 0;
+        for (PollFD& pollfd : fds) {
+            const FileDescriptor& descriptor = *file_descriptors[pollfd.fd];
+            if (!descriptor.event_value) {
+                continue;
+            }
+            const bool wants_in = True(pollfd.events & PollEvents::In) ||
+                                  pollfd.events == PollEvents{};
+            const bool readable = descriptor.event_value->load() > 0 && wants_in;
+            pollfd.revents = readable ? PollEvents::In : PollEvents{};
+            if (readable) {
+                ++events_ready;
+            }
+        }
+    };
+
+    auto result = Network::Poll(host_pollfds, events_ready > 0 ? 0 : (timeout < 0 ? InfinitePollSliceMs : timeout));
+
+    if (timeout < 0 && events_ready == 0 && result.first == 0) {
+        recheck_events();
+    }
+
+    // A slice of an infinite poll that found nothing answers ETIMEDOUT, not success. Hardware's
+    // poller is told its wait expired and goes and runs whatever was waiting on a timer -- which
+    // for a gRPC transport is the queued RPC. Answered as plain success with no events it reads
+    // as a spurious wakeup instead, the queue is left alone, and the connection sits established
+    // without ever opening a stream. Ryujinx answers ETIMEDOUT here and the same title works.
+    bool timed_out_waiting = false;
+    if (timeout < 0 && events_ready == 0 && result.first == 0 &&
+        result.second == Network::Errno::SUCCESS) {
+        timed_out_waiting = true;
+    }
+
+    for (size_t i = 0; i < fds.size(); ++i) {
+        if (host_of[i] != std::numeric_limits<size_t>::max()) {
+            fds[i].revents = Translate(host_pollfds[host_of[i]].revents);
+        }
+        if (True(fds[i].revents)) {
+            LOG_DEBUG(Service, "Poll fd={} events={:#x} -> revents={:#x}", fds[i].fd,
+                      static_cast<u16>(fds[i].events), static_cast<u16>(fds[i].revents));
+        } else {
+            LOG_TRACE(Service, "Poll fd={} events={:#x} -> nothing", fds[i].fd,
+                      static_cast<u16>(fds[i].events));
+        }
     }
     std::memcpy(write_buffer.data(), fds.data(), nfds * sizeof(PollFD));
 
-    return Translate(result);
+    auto [ready, bsd_errno] = Translate(result);
+
+    // Event fds were answered here, not by the host, so they count here too -- and a poll that
+    // found one is a success however the host poll of the rest turned out.
+    if (events_ready > 0) {
+        ready = (ready > 0 ? ready : 0) + events_ready;
+        bsd_errno = Errno::SUCCESS;
+    } else if (timed_out_waiting) {
+        ready = 0;
+        bsd_errno = Errno::TIMEDOUT;
+    }
+
+    return {ready, bsd_errno};
 }
 
 std::pair<s32, Errno> BSD_USA::AcceptImpl(s32 fd, std::vector<u8>& write_buffer) {
@@ -762,14 +1236,41 @@ Errno BSD_USA::ConnectImpl(s32 fd, std::span<const u8> addr) {
         return Errno::BADF;
     }
 
+    // [OpenPak] An IPv6 sockaddr arrives as {len, family=28, port, flowinfo, addr[16], scope}:
+    // a title's gRPC stack (NPLN) dials its dual-mode socket with the v4-mapped form of the
+    // resolver's IPv4 answer, so the address this layer speaks is the mapped tail. The socket
+    // itself -- created AF_INET6 -- decides the on-wire shape it is given.
+    if (addr.size() >= 24 && addr[1] == 28) {
+        Network::SockAddrIn mapped{};
+        mapped.family = Network::Domain::INET6;
+        mapped.portno = static_cast<u16>(addr[2] << 8 | addr[3]);
+        std::memcpy(mapped.ip.data(), addr.data() + 20, mapped.ip.size());
+
+        const Errno result = Translate(file_descriptors[fd]->socket->Connect(mapped));
+
+        LOG_DEBUG(Service,
+                  "[OpenPak] Connect fd={} -> [v6 mapped] {}.{}.{}.{}:{} -> errno {}", fd,
+                  mapped.ip[0], mapped.ip[1], mapped.ip[2], mapped.ip[3], mapped.portno,
+                  static_cast<u32>(result));
+
+        if (result == Errno::ISCONN) {
+            return Errno::SUCCESS;
+        }
+        return result;
+    }
+
     auto addr_in = GetValue<SockAddrIn>(addr);
 
     const Errno result = Translate(file_descriptors[fd]->socket->Connect(Translate(addr_in)));
 
     // [OpenPak] Where a connection went and whether it took: a title dialling the wrong address
     // and one dialling the right address and being refused look identical without this.
-    LOG_DEBUG(Service, "[OpenPak] Connect fd={} -> {}.{}.{}.{}:{} -> errno {}", fd, addr_in.ip[0],
-              addr_in.ip[1], addr_in.ip[2], addr_in.ip[3], addr_in.portno,
+    const auto translated = Translate(addr_in);
+    LOG_DEBUG(Service,
+              "[OpenPak] Connect fd={} -> {}.{}.{}.{}: guest port field {} -> dialled {} "
+              "(bytes {:02x} {:02x} {:02x} {:02x}) -> errno {}",
+              fd, addr_in.ip[0], addr_in.ip[1], addr_in.ip[2], addr_in.ip[3], addr_in.portno,
+              translated.portno, addr[0], addr[1], addr[2], addr[3],
               static_cast<u32>(result));
 
     if (result == Errno::ISCONN) {
@@ -888,7 +1389,12 @@ Errno BSD_USA::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8
     }
 
     if (level != static_cast<u32>(SocketLevel::SOCKET)) {
-        UNIMPLEMENTED_MSG("Unknown getsockopt level");
+        // [OpenPak] The set side already tolerates any level it does not specifically implement;
+        // this must do the same, or a title that sets an option at some other level and reads it
+        // straight back to confirm sees a set-ok/get-fails mismatch and closes before connect.
+        // Echo zeroed bytes of the requested size rather than failing outright.
+        LOG_WARNING(Service, "(STUBBED) Unknown getsockopt level={}, echoing zeroed value", level);
+        std::fill(optval.begin(), optval.end(), 0);
         return Errno::SUCCESS;
     }
 
@@ -956,14 +1462,32 @@ Errno BSD_USA::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8
                 "Incorrect getsockopt option size");
             optval.resize(sizeof(Errno));
             PutValue(optval, translated_pending_err);
+
+            // What this answers decides whether a title writes its first byte on a freshly
+            // connected socket or gives up on it, so it is worth a line.
+            LOG_INFO(Service, "[OpenPak] SO_ERROR read: {}", static_cast<u32>(translated_pending_err));
         }
         return Translate(getsockopt_err);
     }
-    default:
-        // Not "success with a zero": a caller that asked for something this build cannot answer
-        // is told so, the way hardware tells it, instead of being handed a value that looks real.
-        LOG_WARNING(Service, "Unimplemented getsockopt optname={:#x}", static_cast<u32>(optname));
-        return Errno::NOPROTOOPT;
+    default: {
+        // [OpenPak] Whatever the set side tolerated without applying is echoed back here: the
+        // guest asked, so it gets its own bytes (or zeros) and SUCCESS -- never NOPROTOOPT,
+        // which next to the tolerant set reads as a broken socket and kills the connection.
+        // Nintendo's 0x80000001 linger-shaped option is the one NPLN's stack actually verifies.
+        const u64 key = static_cast<u64>(level) << 32 | static_cast<u32>(optname);
+        const auto& descriptor = *file_descriptors[fd];
+        const auto stored = descriptor.feigned_sockopts.find(key);
+        if (stored != descriptor.feigned_sockopts.end() && !stored->second.empty()) {
+            optval.resize(std::min(optval.size(), stored->second.size()));
+            std::copy(stored->second.begin(), stored->second.begin() + optval.size(),
+                      optval.begin());
+        } else {
+            LOG_WARNING(Service, "Unimplemented getsockopt optname={:#x}, echoing zeroed value",
+                        static_cast<u32>(optname));
+            std::fill(optval.begin(), optval.end(), 0);
+        }
+        return Errno::SUCCESS;
+    }
     }
 }
 
@@ -984,11 +1508,37 @@ Errno BSD_USA::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<cons
     }
 
     if (level != static_cast<u32>(SocketLevel::SOCKET)) {
-        LOG_WARNING(Service, "(STUBBED) setsockopt with level={}, optname={}", level, optname);
+        const u64 key = static_cast<u64>(level) << 32 | static_cast<u32>(optname);
+        file_descriptors[fd]->feigned_sockopts[key].assign(optval.begin(), optval.end());
+        LOG_WARNING(Service, "(STUBBED) setsockopt level={} optname={:#x} ({} bytes), feigned",
+                    level, static_cast<u32>(optname), optval.size());
         return Errno::SUCCESS;
     }
 
     Network::SocketBase* const socket = file_descriptors[fd]->socket.get();
+
+    // [OpenPak] Anything else this build does not know is feigned rather than force-fit into the
+    // u32 options below: Nintendo's linger-shaped 0x80000001 carries eight bytes, and the get
+    // side must be able to echo exactly what was set.
+    switch (optname) {
+    case OptName::REUSEADDR:
+    case OptName::KEEPALIVE:
+    case OptName::BROADCAST:
+    case OptName::SNDBUF:
+    case OptName::RCVBUF:
+    case OptName::SNDTIMEO:
+    case OptName::RCVTIMEO:
+    case OptName::NOSIGPIPE:
+    case OptName::LINGER:
+        break;
+    default: {
+        const u64 key = static_cast<u64>(level) << 32 | static_cast<u32>(optname);
+        file_descriptors[fd]->feigned_sockopts[key].assign(optval.begin(), optval.end());
+        LOG_WARNING(Service, "(STUBBED) setsockopt optname={:#x} ({} bytes), feigned",
+                    static_cast<u32>(optname), optval.size());
+        return Errno::SUCCESS;
+    }
+    }
 
     if (optname == OptName::LINGER) {
         ASSERT(optval.size() == sizeof(Linger));
@@ -1022,9 +1572,16 @@ Errno BSD_USA::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<cons
     case OptName::NOSIGPIPE:
         LOG_WARNING(Service, "(STUBBED) setting NOSIGPIPE to {}", value);
         return Errno::SUCCESS;
-    default:
-        UNIMPLEMENTED_MSG("Unimplemented optname={}", optname);
+    default: {
+        // [OpenPak] Tolerated, remembered, and echoed back by the matching get: an unimplemented
+        // option must not answer SUCCESS here and NOPROTOOPT there, or a title verifying its own
+        // settings abandons the socket (and the connection) over a disagreement we invented.
+        const u64 key = static_cast<u64>(level) << 32 | static_cast<u32>(optname);
+        file_descriptors[fd]->feigned_sockopts[key].assign(optval.begin(), optval.end());
+        LOG_WARNING(Service, "(STUBBED) setsockopt level={} optname={:#x} ({} bytes), feigned",
+                    level, static_cast<u32>(optname), optval.size());
         return Errno::SUCCESS;
+    }
     }
 }
 
@@ -1054,10 +1611,6 @@ std::pair<s32, Errno> BSD_USA::RecvImpl(s32 fd, u32 flags, std::vector<u8>& mess
         if (value == 0) {
             return {-1, Errno::AGAIN};
         }
-
-        // Take the wakeup byte back out, so poll() stops reporting it as readable.
-        std::vector<u8> drain(8);
-        void(descriptor.socket->Recv(0, drain));
 
         if (message.size() < sizeof(u64)) {
             return {-1, Errno::INVAL};
@@ -1184,12 +1737,14 @@ std::pair<s32, Errno> BSD_USA::SendImpl(s32 fd, u32 flags, std::span<const u8> m
 
         const u64 previous = file_descriptors[fd]->event_value->fetch_add(value);
 
-        if (previous == 0 && value > 0) {
-            const u8 wake = 1;
-            void(file_descriptors[fd]->socket->Send(std::span<const u8>{&wake, 1}, 0));
-        }
-
         LOG_DEBUG(Service, "Event fd {} written {} (now {})", fd, value, previous + value);
+
+        // [OpenPak] Wake any Poll() this title deferred waiting on this event fd: the deferral
+        // event is what tells ServerManager to re-run the deferred handler, and this write is
+        // the moment the wait it was holding out for has ended.
+        if (Kernel::KEvent* deferral_event = GetBsdDeferralEvent()) {
+            deferral_event->Signal(system.Kernel());
+        }
 
         return {static_cast<s32>(sizeof(u64)), Errno::SUCCESS};
     }
@@ -1355,8 +1910,8 @@ BSD_USA::BSD_USA(Core::System& system_, const char* name, bool is_user_)
         {26, &BSD_USA::Close, "Close"},
         {27, &BSD_USA::DuplicateSocket, "DuplicateSocket"},
         {28, nullptr, "GetResourceStatistics"},
-        {29, nullptr, "RecvMMsg"}, //3.0.0+
-        {30, nullptr, "SendMMsg"}, //3.0.0+
+        {29, &BSD_USA::RecvMMsg, "RecvMMsg"}, //3.0.0+
+        {30, &BSD_USA::SendMMsg, "SendMMsg"}, //3.0.0+
         {31, &BSD_USA::EventFd, "EventFd"}, //7.0.0+
         {32, nullptr, "RegisterResourceStatisticsName"}, //7.0.0+
         {33, nullptr, "RegisterClientShared"}, //10.0.0+

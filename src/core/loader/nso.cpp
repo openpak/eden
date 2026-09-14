@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <algorithm>
 #include <cinttypes>
 #include <cstring>
@@ -149,6 +150,62 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         std::copy(pi_header.begin() + sizeof(NSOHeader), pi_header.end(), patchable_section.data());
     }
 
+    // [OpenPak] Stardew Valley 1.6.15.13 / update 0.20.0 clean-room interoperability patch.
+    // The game's userspace OpenSSL stack accepts Nintendo's CA but rejects the replacement CA
+    // before it emits TLS Finished, and its SDK's SSL-context setup reads a never-set
+    // certificate-acceptance flag whose clear value installs a real-check callback -- the
+    // handshake is then followed by a client-side gRPC UNAVAILABLE cancel before any HTTP/2
+    // HEADERS (nn::Result 2321-4992): the title sits "connected" to the NPLN tenant without
+    // ever sending its first RPC. Offline analysis of this exact build located X509_verify_cert
+    // and the flag read; both are bypassed, scoped to the title, module, build ID, and expected
+    // original prologue so another revision can never be patched accidentally. Identical to the
+    // proven citron and Ryujinx patch sets for this build.
+    if (pm && pm->GetTitleID() == 0x0100E65002BB8000ULL && name == "main") {
+        constexpr std::string_view stardew_build =
+            "E7F845093E8CBC68DACF011CCB620D6667B5A20B";
+        constexpr size_t verify_offset = 0x79B4C10;
+        constexpr std::array<u8, 8> expected{{0xFE, 0x57, 0xBE, 0xA9, 0xF4, 0x4F, 0x01, 0xA9}};
+        // mov w0, #1; ret
+        constexpr std::array<u8, 8> replacement{{0x20, 0x00, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6}};
+        constexpr size_t accept_flag_offset = 0x782F5D0;
+        constexpr std::array<u8, 4> flag_expected{{0xAA, 0xE2, 0x40, 0x39}}; // ldrb w10,[x21,#0x38]
+        constexpr std::array<u8, 4> flag_replacement{{0x2A, 0x00, 0x80, 0x52}}; // mov w10, #1
+        const auto build_raw = Common::HexToString(nso_header.build_id);
+        const auto build = build_raw.substr(0, build_raw.find_last_not_of('0') + 1);
+        std::span<u8> image(codeset.memory.data() + module_start,
+                            codeset.memory.size() - module_start);
+        if (build != stardew_build) {
+            LOG_ERROR(Loader,
+                      "[OpenPak] Stardew: unsupported main build {}; certificate patch skipped",
+                      build);
+        } else if (verify_offset + expected.size() > image.size() ||
+                   !std::equal(expected.begin(), expected.end(), image.begin() + verify_offset)) {
+            LOG_ERROR(Loader,
+                      "[OpenPak] Stardew: X509 verification prologue mismatch; certificate "
+                      "patch skipped");
+        } else {
+            std::copy(replacement.begin(), replacement.end(), image.begin() + verify_offset);
+            LOG_INFO(Loader,
+                     "[OpenPak] Stardew: build-scoped X509 certificate compatibility patch "
+                     "applied");
+        }
+        if (build != stardew_build) {
+            // Build mismatch already logged above; nothing further to do.
+        } else if (accept_flag_offset + flag_expected.size() > image.size() ||
+                   !std::equal(flag_expected.begin(), flag_expected.end(),
+                               image.begin() + accept_flag_offset)) {
+            LOG_ERROR(Loader,
+                      "[OpenPak] Stardew: certificate-acceptance flag read mismatch; "
+                      "pin-bypass patch skipped");
+        } else {
+            std::copy(flag_replacement.begin(), flag_replacement.end(),
+                      image.begin() + accept_flag_offset);
+            LOG_INFO(Loader,
+                     "[OpenPak] Stardew: build-scoped certificate-acceptance flag bypass "
+                     "applied");
+        }
+    }
+
 #ifdef HAS_NCE
     // If we are computing the process code layout and using nce backend, patch.
     const auto& code = codeset.CodeSegment();
@@ -206,6 +263,12 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
 #endif
         return load_base + image_size;
     }
+
+    // [OpenPak] Where each module landed in the guest address space: a park in guest code
+    // (a title's online stack waiting on a state that never arrives) is only readable with
+    // this, turning a trace's pc/lr into a module and an offset.
+    LOG_INFO(Loader, "[OpenPak] Module '{}' loaded at guest {:#x} - {:#x} ({} bytes)", name,
+             load_base, load_base + image_size, image_size);
 
     // Apply cheats if they exist and the program has a valid title ID
     if (pm) {

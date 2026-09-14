@@ -363,20 +363,22 @@ static std::vector<u8> SerializeAddrInfo(const std::vector<Network::AddrInfo>& v
         Append<u32_be>(data, static_cast<u32>(Translate(addrinfo.family)));      // ai_family
         Append<u32_be>(data, static_cast<u32>(Translate(addrinfo.socket_type))); // ai_socktype
         Append<u32_be>(data, static_cast<u32>(Translate(addrinfo.protocol)));    // ai_protocol
-        Append<u32_be>(data, 16); // ai_addrlen
-        // ^ *not* sizeof(SerializedSockAddrIn), not that it matters since they're the same size
+        Append<u32_be>(data, sizeof(SockAddrIn)); // ai_addrlen
 
-        // ai_addr:
-        Append<u16_be>(data, static_cast<u16>(Translate(addrinfo.addr.family))); // sin_family
+        // ai_addr: a BSD sockaddr_in, the SockAddrIn struct in sockets.h --
+        // {u8 sin_len; u8 sin_family; u16 sin_port; u8 sin_addr[4]; u8 sin_zero[8];}.
+        //
+        // [OpenPak] sin_len is its own byte and must carry the full sockaddr size. Writing
+        // sin_family as one 2-byte big-endian value folds sin_len away as an implicit zero, and
+        // a gRPC title -- NPLN is gRPC -- builds its own connect() sockaddr straight out of this
+        // buffer: off a sin_len of 0 it reads the address and port out of the wrong offsets and
+        // dials a port nobody is listening on, so the connection never completes and the title
+        // sits on its transport deadline. Citron and Ryujinx both had to fix the same byte.
+        Append<u8>(data, static_cast<u8>(sizeof(SockAddrIn)));              // sin_len
+        Append<u8>(data, static_cast<u8>(Translate(addrinfo.addr.family))); // sin_family
         // On the Switch, the following fields are passed through htonl despite
         // already being big-endian, so they end up as little-endian.
-        //
-        // [OpenPak] The port is the exception, and it has to match what the socket layer expects
-        // to receive back: a title hands the sockaddr this returns straight to connect(), and
-        // Translate(SockAddrIn) byte-swaps sin_port on the way in. Written little-endian, 443
-        // comes back round as 0xBB01 -- 47873 -- and the connection goes to a port nobody is
-        // listening on, with the address perfectly correct because only the port is swapped.
-        Append<u16_be>(data, addrinfo.addr.portno);                            // sin_port
+        Append<u16_le>(data, addrinfo.addr.portno);                            // sin_port
         Append<u32_le>(data, Network::IPv4AddressToInteger(addrinfo.addr.ip)); // sin_addr
         data.resize(data.size() + 8, 0);                                       // sin_zero
 
@@ -459,12 +461,29 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
         }
     }
 
+    // [OpenPak] Hold the FIRST npln resolution of the session until the startup translation
+    // storm has passed. A title's NPLN channel that comes up mid-storm parks without ever
+    // sending its first RPC -- the title looks online and freezes. Measured as the Nextendo
+    // npln retention on the Ryujinx side of this integration, where waiting out the burst was
+    // the difference between a working channel and a startup block. One hold per process, and
+    // only for the guest's npln names.
+    static std::once_flag npln_hold;
+    if (host.find("npln") != std::string::npos) {
+        std::call_once(npln_hold, [] {
+            LOG_INFO(Network, "[OpenPak] Holding the first npln resolution for the startup "
+                              "burst to pass");
+            std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+        });
+    }
+
     // [OpenPak] Redirection wins over the blocklist: these are exactly the hosts the blocklist
     // exists to stop, and pointing them at our own server is the point.
     std::string query_host = host;
+    bool redirected = false;
     if (const auto redirect = GetOpenPakRedirectIp(host); redirect.has_value()) {
         LOG_INFO(Network, "[OpenPak] Redirecting '{}' -> '{}'", host, *redirect);
         query_host = *redirect;
+        redirected = true;
     } else if (IsBlockedHost(host)) {
         LOG_WARNING(Network, "Resolution of hostname {} requested, returning EAI_AGAIN", host);
         return {0, GetAddrInfoError::AGAIN};
@@ -480,6 +499,16 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
 
     auto res_v = Network::GetAddressInfo(query_host, service);
     if (auto* res = std::get_if<std::vector<Network::AddrInfo>>(&res_v)) {
+        // [OpenPak] A redirect resolves a literal address, and a literal has no canonical name to
+        // report -- so the answer carried an empty one where the title expected the name it
+        // asked for. An HTTP/2 title builds its :authority from that name: NPLN completed TCP,
+        // TLS and the h2 handshake and then never sent a HEADERS frame, because the authority it
+        // had to send was empty. The name the title asked for is the canonical name here.
+        if (redirected) {
+            for (Network::AddrInfo& entry : *res) {
+                entry.canon_name = host;
+            }
+        }
         const std::vector<u8> data = SerializeAddrInfo(OpenPakAddrInfo(*res), host);
         const u32 data_size = u32(data.size());
         ctx.WriteBuffer(data, 0);

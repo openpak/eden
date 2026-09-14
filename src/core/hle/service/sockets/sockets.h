@@ -9,6 +9,10 @@
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 
+namespace Kernel {
+class KEvent;
+}
+
 namespace Core {
 class System;
 }
@@ -55,6 +59,7 @@ enum class GetAddrInfoError : s32 {
 enum class Domain : u32 {
     Unspecified = 0,
     INET = 2,
+    INET6 = 28,
 };
 
 enum class Type : u32 {
@@ -254,5 +259,19 @@ struct Linger {
 };
 
 void LoopProcess(Core::System& system);
+
+// [OpenPak] BSD's worker threads are few and shared across every socket service registered in
+// LoopProcess. A gRPC-based title parks one of those threads in Poll() waiting on its own
+// eventfd, expecting a *different* guest thread's eventfd Write() to signal completion -- but
+// if enough concurrent Polls each block synchronously, that Write() IPC cannot even be
+// dispatched to a free thread, and the title hangs waiting on itself. BSD::Poll uses this
+// event (via HLERequestContext::SetIsDeferred) to give up its thread instead of blocking when
+// nothing is ready yet and an eventfd is in the set; the eventfd Write path and a 1 ms
+// heartbeat signal it so the deferred poll is re-checked until something is genuinely ready.
+// Measured as the Nextendo deferred-poll machinery: the one repair that fires throughout a
+// working Stardew online session (1527 deferrals), carrying exactly the flow that stalls
+// without it -- the title's first NPLN RPC.
+void SetBsdDeferralEvent(Kernel::KEvent* event);
+Kernel::KEvent* GetBsdDeferralEvent();
 
 } // namespace Service::Sockets

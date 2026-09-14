@@ -368,6 +368,8 @@ Domain TranslateDomainFromNative(int domain) {
         return Domain::Unspecified;
     case AF_INET:
         return Domain::INET;
+    case AF_INET6:
+        return Domain::INET6;
     default:
         UNIMPLEMENTED_MSG("Unhandled domain={}", domain);
         return Domain::INET;
@@ -380,6 +382,8 @@ int TranslateDomainToNative(Domain domain) {
         return 0;
     case Domain::INET:
         return AF_INET;
+    case Domain::INET6:
+        return AF_INET6;
     default:
         UNIMPLEMENTED_MSG("Unimplemented domain={}", domain);
         return 0;
@@ -629,6 +633,25 @@ SockAddrIn TranslateToSockAddrIn(sockaddr_in input, size_t input_len) {
     return result;
 }
 
+/// A dual-mode v6 socket reports its peers as IPv6; the IPv4 ones are the mapped form, whose
+/// last four bytes are the address everything else in this layer speaks.
+SockAddrIn TranslateToSockAddrIn(const sockaddr_storage& input, size_t input_len) {
+    if (input.ss_family == AF_INET6) {
+        const auto& addr_in6 = reinterpret_cast<const sockaddr_in6&>(input);
+        SockAddrIn result{};
+        result.family = Domain::INET6;
+        result.portno = ntohs(addr_in6.sin6_port);
+        if (addr_in6.sin6_addr.s6_addr[0] == 0 && addr_in6.sin6_addr.s6_addr[1] == 0 &&
+            addr_in6.sin6_addr.s6_addr[10] == 0xff && addr_in6.sin6_addr.s6_addr[11] == 0xff) {
+            result.family = Domain::INET;
+            std::memcpy(result.ip.data(), addr_in6.sin6_addr.s6_addr + 12, result.ip.size());
+        }
+        return result;
+    }
+
+    return TranslateToSockAddrIn(reinterpret_cast<const sockaddr_in&>(input), input_len);
+}
+
 short TranslatePollEvents(PollEvents events) {
     short result = 0;
 
@@ -837,9 +860,19 @@ Errno Socket::SetSockOpt(SOCKET fd_so, int option, T value) {
     return GetAndLogLastError();
 }
 
-Errno Socket::Initialize(Domain domain, Type type, Protocol protocol) {
-    fd = socket(TranslateDomainToNative(domain), TranslateTypeToNative(type), TranslateProtocolToNative(protocol));
+Errno Socket::Initialize(Domain domain_, Type type, Protocol protocol) {
+    domain = domain_;
+    fd = socket(TranslateDomainToNative(domain_), TranslateTypeToNative(type),
+                TranslateProtocolToNative(protocol));
     if (fd != INVALID_SOCKET) {
+        // [OpenPak] A dual-mode v6 socket, so a title's IPv6 socket can reach the IPv4 world:
+        // a title's gRPC stack (NPLN) dials its IPv6 socket with the v4-mapped resolver answer,
+        // and refusing the family at socket() poisons its whole channel state.
+        if (domain_ == Domain::INET6) {
+            const int no = 0;
+            setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&no),
+                       sizeof(no));
+        }
         return Errno::SUCCESS;
     }
 
@@ -885,6 +918,23 @@ std::pair<SocketBase::AcceptResult, Errno> Socket::Accept() {
 }
 
 Errno Socket::Connect(SockAddrIn addr_in) {
+    // A dual-mode v6 socket is told where to go as an IPv4-mapped IPv6 address; anything else
+    // keeps the IPv4 shape it always had.
+    if (domain == Domain::INET6) {
+        sockaddr_in6 host_addr{};
+        host_addr.sin6_family = AF_INET6;
+        host_addr.sin6_port = htons(addr_in.portno);
+        host_addr.sin6_addr.s6_addr[10] = 0xff;
+        host_addr.sin6_addr.s6_addr[11] = 0xff;
+        std::memcpy(host_addr.sin6_addr.s6_addr + 12, addr_in.ip.data(), addr_in.ip.size());
+        if (connect(fd, reinterpret_cast<sockaddr*>(&host_addr), sizeof(host_addr)) !=
+            SOCKET_ERROR) {
+            return Errno::SUCCESS;
+        }
+
+        return GetAndLogLastError();
+    }
+
     const sockaddr host_addr_in = TranslateFromSockAddrIn(addr_in);
     if (connect(fd, &host_addr_in, sizeof(host_addr_in)) != SOCKET_ERROR) {
         return Errno::SUCCESS;
@@ -894,7 +944,7 @@ Errno Socket::Connect(SockAddrIn addr_in) {
 }
 
 std::pair<SockAddrIn, Errno> Socket::GetPeerName() {
-    sockaddr_in addr;
+    sockaddr_storage addr;
     socklen_t addrlen = sizeof(addr);
     if (getpeername(fd, reinterpret_cast<sockaddr*>(&addr), &addrlen) == SOCKET_ERROR) {
         return {SockAddrIn{}, GetAndLogLastError()};
@@ -904,7 +954,7 @@ std::pair<SockAddrIn, Errno> Socket::GetPeerName() {
 }
 
 std::pair<SockAddrIn, Errno> Socket::GetSockName() {
-    sockaddr_in addr;
+    sockaddr_storage addr;
     socklen_t addrlen = sizeof(addr);
     if (getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &addrlen) == SOCKET_ERROR) {
         return {SockAddrIn{}, GetAndLogLastError()};
@@ -914,6 +964,21 @@ std::pair<SockAddrIn, Errno> Socket::GetSockName() {
 }
 
 Errno Socket::Bind(SockAddrIn addr) {
+    // A dual-mode v6 socket binds its IPv4 address in the mapped form.
+    if (domain == Domain::INET6) {
+        sockaddr_in6 host_addr{};
+        host_addr.sin6_family = AF_INET6;
+        host_addr.sin6_port = htons(addr.portno);
+        host_addr.sin6_addr.s6_addr[10] = 0xff;
+        host_addr.sin6_addr.s6_addr[11] = 0xff;
+        std::memcpy(host_addr.sin6_addr.s6_addr + 12, addr.ip.data(), addr.ip.size());
+        if (bind(fd, reinterpret_cast<sockaddr*>(&host_addr), sizeof(host_addr)) != SOCKET_ERROR) {
+            return Errno::SUCCESS;
+        }
+
+        return GetAndLogLastError();
+    }
+
     const sockaddr addr_in = TranslateFromSockAddrIn(addr);
     if (bind(fd, &addr_in, sizeof(addr_in)) != SOCKET_ERROR) {
         return Errno::SUCCESS;

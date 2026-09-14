@@ -137,6 +137,8 @@ Network::Domain Translate(Domain domain) {
         return Network::Domain::Unspecified;
     case Domain::INET:
         return Network::Domain::INET;
+    case Domain::INET6:
+        return Network::Domain::INET6;
     default:
         UNIMPLEMENTED_MSG("Unimplemented domain={}", domain);
         return {};
@@ -149,6 +151,8 @@ Domain Translate(Network::Domain domain) {
         return Domain::Unspecified;
     case Network::Domain::INET:
         return Domain::INET;
+    case Network::Domain::INET6:
+        return Domain::INET6;
     default:
         UNIMPLEMENTED_MSG("Unimplemented domain={}", domain);
         return {};
