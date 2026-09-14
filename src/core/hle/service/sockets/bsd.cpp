@@ -1116,6 +1116,14 @@ std::pair<s32, Errno> BSD_USA::PollImpl(std::vector<u8>& write_buffer, std::span
         Network::PollFD& host = host_pollfds.emplace_back();
         host.socket = descriptor.socket.get();
         host.events = Translate(fds[i].events);
+        // [OpenPak] A zero-mask poll entry is still answered when the descriptor has activity:
+        // the title's gRPC stack parks a poll of [wakeup eventfd: In, channel socket: 0] and
+        // relies on the socket's readiness surfacing through that same wait. Linux poll() with
+        // events=0 only ever reports ERR/HUP, so ask the host for In|Out and gate the reported
+        // revents back to the guest by what it actually has.
+        if (host.events == Network::PollEvents{}) {
+            host.events = Network::PollEvents::In | Network::PollEvents::Out;
+        }
         host.revents = Network::PollEvents{};
     }
 
