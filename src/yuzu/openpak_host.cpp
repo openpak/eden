@@ -11,11 +11,10 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QImage>
-#include <QInputDialog>
-#include <QLineEdit>
 #include <QJsonObject>
 #include <QPointer>
 #include <QProcess>
+#include <QStandardItemModel>
 #include <QUrl>
 
 #include <fmt/format.h>
@@ -39,6 +38,9 @@
 #include "openpak/qt/chat_client.h"
 #include "yuzu/openpak_host.h"
 #include "openpak/qt/save_sync.h"
+#include "openpak/qt/sign_in_dialog.h"
+#include "yuzu/game/game_list.h"
+#include "qt_common/game_list/game_list_p.h"
 
 #ifdef ENABLE_WEB_SERVICE
 #include "openpak/api.h"
@@ -235,41 +237,68 @@ std::string OpenPakHost::GetLocalAppId() const {
 }
 
 void OpenPakHost::SignIn() {
+    AskAndSignIn(false, {}, {});
+}
+
+void OpenPakHost::OfferSignInOnce() {
+    // Asked once, ever: "Not now" is an answer, and the OpenPak menu still has Sign in.
+    if (IsLinked() || QSettings().value(QStringLiteral("openpak/asked"), false).toBool()) {
+        return;
+    }
+    QSettings().setValue(QStringLiteral("openpak/asked"), true);
+    AskAndSignIn(true, {}, {});
+}
+
+void OpenPakHost::AskAndSignIn(bool first_run, const QString& error, const QString& last_email) {
 #ifdef ENABLE_WEB_SERVICE
     // Email and password, asked here on the UI thread; the sign-in itself runs off it. The
-    // password goes to openpak.org over public TLS and nowhere else: what comes back is a
-    // website token and the Switch identity the games see.
-    bool ok = false;
-    const QString email = QInputDialog::getText(main_window, tr("Sign in to OpenPak"),
-                                                tr("Email"), QLineEdit::Normal, QString(), &ok);
-    if (!ok || email.trimmed().isEmpty()) {
+    // password goes to OpenPak over TLS and nowhere else: what comes back is a website token
+    // and the Switch identity the games see.
+    OpenPakSignInDialog dialog(main_window, first_run, error, last_email);
+    if (dialog.exec() != QDialog::Accepted) {
         return;
     }
-    const QString password = QInputDialog::getText(main_window, tr("Sign in to OpenPak"),
-                                                   tr("Password"), QLineEdit::Password, QString(), &ok);
-    if (!ok || password.isEmpty()) {
-        return;
-    }
+    const QString email = dialog.Email();
+    const QString password = dialog.Password();
     emit StatusChanged(tr("Signing in to OpenPak..."));
 
     QPointer<OpenPakHost> self(this);
-    std::thread{[this, self, email = email.trimmed().toStdString(), password = password.toStdString()] {
+    std::thread{[this, self, email = email.toStdString(), password = password.toStdString()] {
         auto login_result = WebService::OpenPakApi::SignIn(email, password);
+
+        // Two sign-ins, because they are two different things: the website account is what
+        // friends and cloud saves speak with, and the console chain is what puts an identity in
+        // front of a title server. A link that fails leaves the website half standing.
+        std::string link_failure;
+        if (login_result.ok && openpak::client::session::Enabled()) {
+            link_failure = openpak::client::session::LinkWithPassword(email, password);
+        }
 
         if (!self) {
             return;
         }
         QMetaObject::invokeMethod(
             this,
-            [this, self, result = std::move(login_result)] {
+            [this, self, result = std::move(login_result), link_failure,
+             email = QString::fromStdString(email)] {
                 if (!self) {
                     return;
                 }
                 if (!result.ok) {
                     emit StatusChanged(QString::fromStdString(result.error));
                     emit SignInFinished();
+                    // Back to the dialog with the reason on it, rather than a line in the
+                    // status bar and a menu to find again.
+                    AskAndSignIn(false, QString::fromStdString(result.error), email);
                     return;
                 }
+                emit StatusChanged(
+                    link_failure.empty()
+                        ? tr("Signed in as %1, and this console is now linked to your account.")
+                              .arg(QString::fromStdString(result.username))
+                        : tr("Signed in as %1, but the console link did not complete: %2")
+                              .arg(QString::fromStdString(result.username),
+                                   QString::fromStdString(link_failure)));
 
                 Common::OpenPakAccount::Save(result.pid, result.username, result.friend_code,
                                              result.token, result.bearer);
@@ -578,6 +607,33 @@ void OpenPakHost::PollInvitations() {
 
 
 // ---- openpak::qt::Host: Eden-specific answers ----
+
+std::vector<openpak::qt::Host::Title> OpenPakHost::InstalledTitles() const {
+    // The game list already resolved every name; asking the content provider again would parse
+    // a control NCA per title on the UI thread.
+    std::vector<Title> out;
+    const auto* game_list = main_window->findChild<GameList*>();
+    const QStandardItemModel* model = game_list ? game_list->GetModel() : nullptr;
+    for (int dir = 0; model && dir < model->rowCount(); ++dir) {
+        const QStandardItem* folder = model->item(dir);
+        for (int row = 0; row < folder->rowCount(); ++row) {
+            const QStandardItem* game = folder->child(row);
+            const u64 id = game->data(GameListItemPath::ProgramIdRole).toULongLong();
+            const bool seen = std::any_of(out.begin(), out.end(),
+                                          [id](const Title& title) { return title.id == id; });
+            if (id != 0 && !seen) { // the favourites folder repeats rows
+                out.push_back({id, game->data(GameListItemPath::TitleRole).toString()});
+            }
+        }
+    }
+    return out;
+}
+
+std::filesystem::path OpenPakHost::ModDirectory(u64 title_id) {
+    // load/<TITLEID>/<mod>/romfs: where BISFactory::GetModificationLoadRoot reads, so an
+    // installed mod shows up in the title's Properties -> Add-Ons like any other.
+    return Common::FS::GetEdenPath(Common::FS::EdenPath::LoadDir) / fmt::format("{:016X}", title_id);
+}
 
 std::filesystem::path OpenPakHost::SaveDirectory(u64 title_id) {
     // nand/user/save/0000000000000000/<user>/<TITLEID>, the same walk Citron's
