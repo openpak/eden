@@ -192,15 +192,27 @@ private:
         auto bsd = system.ServiceManager().GetService<Service::Sockets::BSD_USA>("bsd:u");
         ASSERT_OR_EXECUTE(bsd, { return ResultInternalError; });
 
+        // [OpenPak] DoNotCloseSocket: the title keeps its descriptor, polls it through bsd and may
+        // dial again on it, and is told so with -1. No duplicate is made for it: a second
+        // descriptor nobody closes is a slot lost for every connection a session makes, and
+        // closing one would close the socket the title still holds, since both share it.
+        if (do_not_close_socket) {
+            std::optional<std::shared_ptr<Network::SocketBase>> sock = bsd->GetSocket(fd);
+            if (!sock.has_value()) {
+                LOG_ERROR(Service_SSL, "invalid socket fd {}", fd);
+                return ResultInvalidSocket;
+            }
+            *out_fd = -1;
+            socket = std::move(*sock);
+            backend->SetSocket(socket);
+            return ResultSuccess;
+        }
+
         auto const res_v = bsd->DuplicateSocketImpl(fd);
         if (auto *res = std::get_if<s32>(&res_v)) {
             const s32 duplicated_fd = *res;
-            if (do_not_close_socket) {
-                *out_fd = duplicated_fd;
-            } else {
-                *out_fd = -1;
-                fd_to_close = duplicated_fd;
-            }
+            *out_fd = -1;
+            fd_to_close = duplicated_fd;
             std::optional<std::shared_ptr<Network::SocketBase>> sock = bsd->GetSocket(duplicated_fd);
             if (!sock.has_value()) {
                 LOG_ERROR(Service_SSL, "invalid socket fd {} after duplication", duplicated_fd);
