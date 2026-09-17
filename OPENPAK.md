@@ -3,8 +3,10 @@
 Fork of upstream Eden (Switch, yuzu family) with one addition: the shared OpenPak client.
 This build **is the client, not an emulator with a mode** — OpenPak is on by default. The
 integration is `openpak-client` vendored at `externals/openpak-client` with its Qt dialogs,
-hosted by `OpenPakHost` (`src/yuzu/openpak_host.*`): sign in/out, the shared account dialog
-(Tools → OpenPak Account), friends with presence and requests, cloud saves, and an invitation
+hosted by `OpenPakHost` (`src/yuzu/openpak_host.*`): a one-time sign-in offer at first launch,
+sign in/out (which also links the console), the shared account dialog (Tools → OpenPak
+Account) with friends, presence and requests, cloud saves, invitations, mods (installed into
+`load/<title>/`), news and status, and an invitation
 path that skips the native Invite Friends applet (blocked by an unrecovered firmware struct
 layout) by injecting the friend's already-fetched presence app_field into the local
 pending-invitation queue, where the title's own poll picks it up. Nintendo's online hostnames

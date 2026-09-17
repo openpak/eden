@@ -596,6 +596,12 @@ MainWindow::MainWindow(bool has_broken_vulkan)
                 LibraryAppletParameters(0x010000000000100Dull, Service::AM::AppletId::QLaunch));
         }
     }
+
+    // OpenPak: the one-time sign-in offer, once the window is up and nothing is booting.
+    if (!should_launch_setup && game_path.isEmpty() && !should_launch_qlaunch &&
+        !should_launch_hlaunch) {
+        QTimer::singleShot(0, openpak_host, &OpenPakHost::OfferSignInOnce);
+    }
 }
 
 MainWindow::~MainWindow() {

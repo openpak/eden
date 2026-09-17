@@ -48,6 +48,8 @@ public:
     std::string GetLocalAppId() const override;
 
     void SignIn() override;
+    // The one-time "Sign in to OpenPak?" at first launch. Does nothing once it has been asked.
+    void OfferSignInOnce();
     void SignOut() override;
     void RefreshFriendCache() override;
     void NotifyFriendRequestSent(const QString& friend_code) override;
@@ -73,6 +75,8 @@ public:
     }
 
     // openpak::qt::Host: what the shared dialogs need from Eden
+    std::vector<Title> InstalledTitles() const override;
+    std::filesystem::path ModDirectory(u64 title_id) override;
     std::filesystem::path SaveDirectory(u64 title_id) override;
     QString AccentColor() const override;
     bool IsDarkTheme() const override;
@@ -89,6 +93,7 @@ public:
     openpak::qt::Navigation* CreateNavigation(QObject* parent) override;
 
 private:
+    void AskAndSignIn(bool first_run, const QString& error, const QString& last_email);
     void ApplyProfileName(const std::string& name);
     // Forces the active Switch profile's picture to match the linked Nextendo account's
     // avatar, mirroring ApplyProfileName's username sync. Fetches async since it needs a
