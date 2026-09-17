@@ -4,6 +4,10 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <string_view>
+
+#include "common/hex_util.h"
 #include "common/string_util.h"
 
 #include "core/core.h"
@@ -61,6 +65,32 @@ struct SslVersion {
         BitField<24, 7, u32> api_version;
     };
 };
+
+// [OpenPak] EDEN_SSL_TRACE=1 logs every guest handshake result and the first bytes of every
+// guest read and write, in the clear. A diagnostic, read once, and never on by default: what it
+// prints includes tokens.
+static bool TraceEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_SSL_TRACE");
+        return value != nullptr && std::string_view{value} == "1";
+    }();
+    return enabled;
+}
+
+static std::string TraceResult(Result res) {
+    if (res == ResultSuccess) {
+        return "Success";
+    }
+    if (res == ResultWouldBlock) {
+        return "WouldBlock";
+    }
+    return fmt::format("{:04}-{:04} ({:#x})", 2000 + static_cast<u32>(res.GetModule()),
+                       res.GetDescription(), res.raw);
+}
+
+static std::string TraceBytes(std::span<const u8> data) {
+    return Common::HexToString(data.first((std::min)(data.size(), size_t{96})));
+}
 
 struct SslContextSharedData {
     u32 connection_count = 0;
@@ -154,6 +184,7 @@ private:
     std::vector<u8> negotiated_alpn_proto; ///< What the server picked, read back by the title.
     bool did_handshake = false;
     u32 verify_option = 0;
+    std::string host_name; ///< As the title set it; what the trace names a connection by.
 
     Result SetSocketDescriptorImpl(s32* out_fd, s32 fd) {
         LOG_DEBUG(Service_SSL, "called, fd={}", fd);
@@ -186,6 +217,7 @@ private:
     Result SetHostNameImpl(const std::string& hostname) {
         LOG_DEBUG(Service_SSL, "called. hostname={}", hostname);
         ASSERT(!did_handshake);
+        host_name = hostname;
         return backend->SetHostName(hostname);
     }
 
@@ -233,6 +265,12 @@ private:
 
         Result res = backend->DoHandshake();
         did_handshake = res.IsSuccess();
+
+        // Success included: a handshake that worked and said nothing looks exactly like one
+        // that never ran.
+        if (TraceEnabled()) {
+            LOG_INFO(Service_SSL, "SSLHS {} -> {}", host_name, TraceResult(res));
+        }
 
         // What was chosen is kept apart from what was offered. Overwriting the offered list with
         // the negotiated name destroys it: "h2" on its own is not a length-prefixed protocol
@@ -288,15 +326,29 @@ private:
         size_t actual_size{};
         Result res = backend->Read(&actual_size, *out_data);
         if (res != ResultSuccess) {
+            // Would-block is every idle poll of a non-blocking connection; it would be the log.
+            if (TraceEnabled() && res != ResultWouldBlock) {
+                LOG_INFO(Service_SSL, "SSLRX {} failed: {}", host_name, TraceResult(res));
+            }
             return res;
         }
         out_data->resize(actual_size);
+        if (TraceEnabled()) {
+            LOG_INFO(Service_SSL, "SSLRX {} {}B: {}", host_name, actual_size, TraceBytes(*out_data));
+        }
         return res;
     }
 
     Result WriteImpl(size_t* out_size, std::span<const u8> data) {
         ASSERT_OR_EXECUTE(did_handshake, { return ResultInternalError; });
-        return backend->Write(out_size, data);
+        if (TraceEnabled()) {
+            LOG_INFO(Service_SSL, "SSLTX {} {}B: {}", host_name, data.size(), TraceBytes(data));
+        }
+        const Result res = backend->Write(out_size, data);
+        if (TraceEnabled() && res != ResultSuccess) {
+            LOG_INFO(Service_SSL, "SSLTX {} failed: {}", host_name, TraceResult(res));
+        }
+        return res;
     }
 
     Result PendingImpl(s32* out_pending) {
