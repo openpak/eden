@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "common/hex_util.h"
+#include "common/settings.h"
 #include "common/string_util.h"
 
 #include "core/core.h"
@@ -146,6 +147,8 @@ public:
 
         RegisterHandlers(functions);
 
+        // nn::ssl's own default is PeerCa | HostName; a title that never sets the option expects it.
+        verify_option = Settings::values.enable_openpak.GetValue() ? 3 : 0;
         backend->SetVerifyOption(verify_option);
 
         shared_data->connection_count++;
@@ -235,9 +238,12 @@ private:
 
     Result SetVerifyOptionImpl(u32 option) {
         ASSERT(!did_handshake);
-        LOG_DEBUG(Service_SSL, "called. option={} (forcing 0)", option);
-        verify_option = 0;
-        backend->SetVerifyOption(0);
+        // [OpenPak] With OpenPak on, what the title asks for is what it gets: every redirected
+        // name answers with a chain to the OpenPak CA, which the backend trusts, so there is
+        // nothing left to excuse. Without it the option stays forced off, as upstream has it.
+        verify_option = Settings::values.enable_openpak.GetValue() ? option : 0;
+        LOG_DEBUG(Service_SSL, "called. option={} (using {})", option, verify_option);
+        backend->SetVerifyOption(verify_option);
         return ResultSuccess;
     }
 

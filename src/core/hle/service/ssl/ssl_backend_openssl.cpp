@@ -10,6 +10,7 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
+#include <openssl/x509v3.h>
 
 #include "common/fs/file.h"
 #include "common/hex_util.h"
@@ -19,6 +20,7 @@
 #include "core/hle/service/ssl/ssl_backend.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/sockets.h"
+#include "openpak/session.h"
 
 #ifdef YUZU_BUNDLED_OPENSSL
 #include <openssl/cert.h>
@@ -121,17 +123,23 @@ inline void LoadCaCertStore(SSL_CTX* ctx, const char* ca_cert, std::size_t size)
 class SSLConnectionBackendOpenSSL final : public SSLConnectionBackend {
 public:
     Result Init() {
-        // on bundled OpenSSL, load ca cert store
-#ifdef YUZU_BUNDLED_OPENSSL
-        LoadCaCertStore(ssl_ctx, kCert, sizeof(kCert));
-#endif
         std::call_once(one_time_init_flag, OneTimeInit);
+
+        // on bundled OpenSSL, load ca cert store. After the context exists: before it, the very
+        // first connection was left without the bundled roots.
+#ifdef YUZU_BUNDLED_OPENSSL
+        if (ssl_ctx) {
+            LoadCaCertStore(ssl_ctx, kCert, sizeof(kCert));
+        }
+#endif
 
         if (!one_time_init_success) {
             LOG_ERROR(Service_SSL,
                       "Can't create SSL connection because OpenSSL one-time initialization failed");
             return ResultInternalError;
         }
+
+        TrustOpenPakCa();
 
         ssl = SSL_new(ssl_ctx);
         if (!ssl) {
@@ -158,33 +166,71 @@ public:
         socket = std::move(socket_in);
     }
 
+    // The name and the verify option arrive in either order, so both are only remembered here
+    // and applied together when the handshake starts.
     Result SetHostName(const std::string& hostname) override {
-        if (!skip_cert_verification) {
-            if (!SSL_set1_host(ssl, hostname.c_str())) {
-                LOG_ERROR(Service_SSL, "SSL_set1_host({}) failed", hostname);
-                return CheckOpenSSLErrors();
-            }
-        }
-        if (!SSL_set_tlsext_host_name(ssl, hostname.c_str())) { // hostname for SNI
-            LOG_ERROR(Service_SSL, "SSL_set_tlsext_host_name({}) failed", hostname);
-            return CheckOpenSSLErrors();
-        }
+        host_name = hostname;
         return ResultSuccess;
     }
 
     void SetVerifyOption(u32 option) override {
-        // [OpenPak] A redirected host answers with our own certificate, not one chaining to the
-        // CA the title pinned, so verification can never pass while OpenPak is on.
-        skip_cert_verification = (option == 0) || Settings::values.enable_openpak.GetValue();
-        LOG_WARNING(Service_SSL, "option={} skip_verification={}", option,
-                    skip_cert_verification);
-        if (skip_cert_verification) {
-            SSL_set_verify(ssl, SSL_VERIFY_NONE, nullptr);
-            SSL_set1_host(ssl, nullptr);
-            SSL_set_hostflags(ssl, 0);
-        } else {
-            SSL_set_verify(ssl, SSL_VERIFY_PEER, nullptr);
+        verify_option = option;
+    }
+
+    // [OpenPak] A title dials a game server by address and names it by that address: what it
+    // sets as the host name is then "145.241.199.19", to be matched against the certificate's
+    // IP SAN and never sent as SNI, which carries names only (RFC 6066).
+    static bool IsIpLiteral(const std::string& name) {
+        ASN1_OCTET_STRING* const ip = a2i_IPADDRESS(name.c_str());
+        ASN1_OCTET_STRING_free(ip);
+        return ip != nullptr;
+    }
+
+    Result ApplyVerification() {
+        constexpr u32 PeerCa = 1;
+        constexpr u32 HostName = 2;
+
+        const bool is_ip = IsIpLiteral(host_name);
+        skip_cert_verification = (verify_option & PeerCa) == 0;
+        SSL_set_verify(ssl, skip_cert_verification ? SSL_VERIFY_NONE : SSL_VERIFY_PEER, nullptr);
+
+        X509_VERIFY_PARAM* const param = SSL_get0_param(ssl);
+        SSL_set1_host(ssl, nullptr);
+        if (!skip_cert_verification && (verify_option & HostName) != 0 && !host_name.empty()) {
+            const int ok = is_ip ? X509_VERIFY_PARAM_set1_ip_asc(param, host_name.c_str())
+                                 : SSL_set1_host(ssl, host_name.c_str());
+            if (!ok) {
+                LOG_ERROR(Service_SSL, "Could not set {} as the name to verify", host_name);
+                return CheckOpenSSLErrors();
+            }
         }
+        if (!host_name.empty() && !is_ip && !SSL_set_tlsext_host_name(ssl, host_name.c_str())) {
+            LOG_ERROR(Service_SSL, "SSL_set_tlsext_host_name({}) failed", host_name);
+            return CheckOpenSSLErrors();
+        }
+        LOG_DEBUG(Service_SSL, "host={} ip={} option={} verify={}", host_name, is_ip, verify_option,
+                  !skip_cert_verification);
+        return ResultSuccess;
+    }
+
+    // [OpenPak] OpenPak answers to Nintendo's own names, which no public CA can issue for, so its
+    // CA joins the roots a guest connection is checked against. Nothing else is loosened: a
+    // chain that reaches neither it nor a public root is refused.
+    static void TrustOpenPakCa() {
+        if (!Settings::values.enable_openpak.GetValue()) {
+            return;
+        }
+        const std::vector<u8> der = openpak::client::session::CaCertificateDer();
+        const u8* cursor = der.data();
+        X509* const ca = der.empty() ? nullptr : d2i_X509(nullptr, &cursor, static_cast<long>(der.size()));
+        if (!ca) {
+            LOG_WARNING(Service_SSL, "No OpenPak CA to trust; redirected hosts will fail to verify");
+            return;
+        }
+        // Every call, not once: the bundled-roots build replaces the store per connection.
+        // Adding a certificate the store already holds is a no-op.
+        X509_STORE_add_cert(SSL_CTX_get_cert_store(ssl_ctx), ca);
+        X509_free(ca);
     }
 
     // The title's own protocol list, handed to OpenSSL as it arrived: SetNextAlpnProto already
@@ -214,13 +260,18 @@ public:
     }
 
     Result DoHandshake() override {
+        // Once: a non-blocking handshake is called again until it completes.
+        if (!verification_applied) {
+            R_TRY(ApplyVerification());
+            verification_applied = true;
+        }
         SSL_set_verify_result(ssl, X509_V_OK);
         const int ret = SSL_do_handshake(ssl);
 
         if (!skip_cert_verification) {
             const long verify_result = SSL_get_verify_result(ssl);
             if (verify_result != X509_V_OK) {
-                LOG_ERROR(Service_SSL, "SSL cert verification failed because: {}",
+                LOG_ERROR(Service_SSL, "SSL cert verification of {} failed because: {}", host_name,
                           X509_verify_cert_error_string(verify_result));
                 return CheckOpenSSLErrors();
             }
@@ -377,6 +428,9 @@ public:
     BIO* bio = nullptr;
     bool got_read_eof = false;
     bool skip_cert_verification = false;
+    bool verification_applied = false;
+    u32 verify_option = 0;
+    std::string host_name;
 
     std::shared_ptr<Network::SocketBase> socket;
 };
