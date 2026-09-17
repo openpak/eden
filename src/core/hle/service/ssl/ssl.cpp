@@ -370,8 +370,9 @@ private:
     }
 
     Result PendingImpl(s32* out_pending) {
-        LOG_WARNING(Service_SSL, "(STUBBED) called.");
-        *out_pending = 0;
+        // Decrypted bytes the library still holds. The socket polls as not readable while these
+        // wait, so a title that reads in pieces smaller than a record asks here before it polls.
+        *out_pending = static_cast<s32>(backend->Pending());
         return ResultSuccess;
     }
 

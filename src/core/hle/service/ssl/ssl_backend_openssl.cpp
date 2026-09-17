@@ -298,6 +298,10 @@ public:
         return HandleReturn("SSL_write_ex", out_size, ret);
     }
 
+    size_t Pending() override {
+        return static_cast<size_t>(SSL_pending(ssl));
+    }
+
     Result HandleReturn(const char* what, size_t* actual, int ret) {
         const int ssl_err = SSL_get_error(ssl, ret);
         CheckOpenSSLErrors();
@@ -485,6 +489,10 @@ void OneTimeInit() {
     }
 
     SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER, nullptr);
+
+    // A non-blocking write that would block is retried by the guest from a fresh IPC buffer:
+    // the same bytes at another address, which OpenSSL otherwise refuses as a bad retry.
+    SSL_CTX_set_mode(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
 
     if (!SSL_CTX_set_default_verify_paths(ssl_ctx)) {
         LOG_ERROR(Service_SSL, "SSL_CTX_set_default_verify_paths failed");

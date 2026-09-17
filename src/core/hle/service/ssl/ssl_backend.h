@@ -47,6 +47,10 @@ public:
     virtual Result DoHandshake() = 0;
     virtual Result Read(size_t* out_size, std::span<u8> data) = 0;
     virtual Result Write(size_t* out_size, std::span<const u8> data) = 0;
+    // Plaintext already decrypted and not yet read. Zero where a backend cannot tell.
+    virtual size_t Pending() {
+        return 0;
+    }
     virtual Result GetServerCerts(std::vector<std::vector<u8>>* out_certs) = 0;
 };
 
