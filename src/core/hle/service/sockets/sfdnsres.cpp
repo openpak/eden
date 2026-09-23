@@ -163,12 +163,12 @@ static std::optional<std::string> GetOpenPakRedirectIp(std::string_view host) {
     // collapse onto the first), and a name that must be left alone entirely -- the console's own
     // connection test measures OpenPak instead of the internet if it is redirected.
     if (const auto from_profile =
-            openpak::client::profile::RedirectFor(std::string{host}, server_ip);
+            openpak::NetworkProfile::RedirectFor(std::string{host}, server_ip);
         from_profile.has_value()) {
         return from_profile;
     }
 
-    if (openpak::client::profile::Loaded()) {
+    if (openpak::NetworkProfile::Loaded()) {
         // A profile in hand and no match means the name is not ours to answer.
         return std::nullopt;
     }
