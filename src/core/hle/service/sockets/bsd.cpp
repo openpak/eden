@@ -26,6 +26,8 @@
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/sockets/bsd.h"
+#include "core/hle/service/sockets/interface_list.h"
+#include "core/internal_network/network_interface.h"
 #include "core/hle/service/sockets/sockets_translate.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/socket_proxy.h"
@@ -405,6 +407,46 @@ void BSD_USA::GetSockOpt(HLERequestContext& ctx) {
     rb.Push<s32>(err == Errno::SUCCESS ? 0 : -1);
     rb.PushEnum(err);
     rb.Push<u32>(static_cast<u32>(optval.size()));
+}
+
+void BSD_USA::Sysctl(HLERequestContext& ctx) {
+    // [OpenPak] getifaddrs(): NPLN's WebRTC gathers connection candidates from it. Ported from
+    // Ryujinx; every other query stays unsupported, as before, but now answers instead of
+    // falling through to an unimplemented command.
+    const auto mib_bytes = ctx.ReadBuffer(0);
+    std::vector<s32> mib(std::min<std::size_t>(mib_bytes.size() / sizeof(s32), 16));
+    std::memcpy(mib.data(), mib_bytes.data(), mib.size() * sizeof(s32));
+    const std::size_t new_size = ctx.CanReadBuffer(1) ? ctx.GetReadBufferSize(1) : 0;
+    const std::size_t old_size = ctx.CanWriteBuffer(0) ? ctx.GetWriteBufferSize(0) : 0;
+
+    s32 ret = -1;
+    Errno bsd_errno = Errno::OPNOTSUPP;
+    u32 length = 0;
+
+    const auto iface = Network::GetSelectedNetworkInterface();
+    if (InterfaceList::Matches(mib) && new_size == 0 && iface) {
+        const auto list = InterfaceList::Build(Network::TranslateIPv4(iface->ip_address),
+                                               Network::TranslateIPv4(iface->subnet_mask));
+        length = static_cast<u32>(list.size());
+        if (old_size != 0 && old_size < list.size()) {
+            bsd_errno = Errno::NOMEM; // no buffer is the size probe; a short one is ENOMEM
+        } else {
+            if (old_size != 0) {
+                ctx.WriteBuffer(list);
+            }
+            ret = 0;
+            bsd_errno = Errno::SUCCESS;
+        }
+    } else {
+        LOG_WARNING(Service, "(STUBBED) Sysctl mib=[{}] old={} new={}", fmt::join(mib, ","),
+                    old_size, new_size);
+    }
+
+    IPC::ResponseBuilder rb{ctx, 5};
+    rb.Push(ResultSuccess);
+    rb.Push<s32>(ret);
+    rb.PushEnum(bsd_errno);
+    rb.Push<u32>(length);
 }
 
 void BSD_USA::Listen(HLERequestContext& ctx) {
@@ -1983,7 +2025,7 @@ BSD_USA::BSD_USA(Core::System& system_, const char* name, bool is_user_)
         {4, nullptr, "Open"},
         {5, &BSD_USA::Select, "Select"},
         {6, &BSD_USA::Poll, "Poll"},
-        {7, nullptr, "Sysctl"},
+        {7, &BSD_USA::Sysctl, "Sysctl"},
         {8, &BSD_USA::Recv, "Recv"},
         {9, &BSD_USA::RecvFrom, "RecvFrom"},
         {10, &BSD_USA::Send, "Send"},
