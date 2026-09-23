@@ -71,6 +71,8 @@ void GameTree::UpdateColumnVisibility(GameListModel* model) {
     setColumnHidden(GameListModel::COLUMN_FILE_TYPE, !UISettings::values.show_types);
     setColumnHidden(GameListModel::COLUMN_SIZE, !UISettings::values.show_size);
     setColumnHidden(GameListModel::COLUMN_PLAY_TIME, !UISettings::values.show_play_time);
+    // [OpenPak] Only while OpenPak is on, as Ryujinx shows it.
+    setColumnHidden(GameListModel::COLUMN_ONLINE, !Settings::values.enable_openpak.GetValue());
 }
 
 QString GameTree::GetLastFilterResultItem() const {

@@ -22,6 +22,7 @@
 #include "common/logging.h"
 #include "common/string_util.h"
 #include "frontend_common/play_time_manager.h"
+#include "openpak/compatibility.h"
 #include "qt_common/config/uisettings.h"
 #include "qt_common/qt_common.h"
 
@@ -222,6 +223,54 @@ public:
     bool operator<(const QStandardItem& other) const override {
         return data(CompatNumberRole).value<QString>() <
                other.data(CompatNumberRole).value<QString>();
+    }
+};
+
+/**
+ * [OpenPak] How far OpenPak serves the title's online play: the site's catalogue status (live,
+ * beta, alpha), the list this build shipped with laid under what the site said at sign-in.
+ * Ported from Ryujinx's OpenPak compatibility column; empty for a title OpenPak does not serve.
+ */
+class GameListItemOnline : public GameListItem {
+    Q_DECLARE_TR_FUNCTIONS(GameListItemOnline)
+public:
+    explicit GameListItemOnline(u64 program_id) {
+        setData(type(), TypeRole);
+        const auto entry = openpak::compatibility::Find(program_id);
+        if (!entry) {
+            setData(QStringLiteral("9"), SortRole);
+            return;
+        }
+        struct Look {
+            const char* color;
+            const char* text;
+            const char* tooltip;
+        };
+        // clang-format off
+        static constexpr Look looks[] = {
+            {"#47d35c", QT_TR_NOOP("Live"),  QT_TR_NOOP("Online play works on OpenPak.")},
+            {"#f2d624", QT_TR_NOOP("Beta"),  QT_TR_NOOP("Online play works on OpenPak, with known gaps.")},
+            {"#e8843c", QT_TR_NOOP("Alpha"), QT_TR_NOOP("Online play is being brought up on OpenPak; expect it not to work yet.")},
+        };
+        // clang-format on
+        const auto index = static_cast<std::size_t>(entry->status);
+        const Look& look = looks[index];
+        setData(QString::number(index), SortRole);
+        setText(tr(look.text));
+        setToolTip(entry->backend.empty()
+                       ? tr(look.tooltip)
+                       : QStringLiteral("%1 (%2)").arg(tr(look.tooltip),
+                                                       QString::fromStdString(entry->backend)));
+        setData(QtCommon::CreateCirclePixmapFromColor(QString::fromLatin1(look.color)),
+                Qt::DecorationRole);
+    }
+
+    int type() const override {
+        return static_cast<int>(GameListItemType::Game);
+    }
+
+    bool operator<(const QStandardItem& other) const override {
+        return data(SortRole).value<QString>() < other.data(SortRole).value<QString>();
     }
 };
 
