@@ -1031,6 +1031,14 @@ void MainWindow::InitializeWidgets() {
     openpak::SetLogSink([](openpak::LogLevel, const std::string& message) {
         LOG_INFO(Frontend, "[openpak] {}", message);
     });
+    // Every request to OpenPak says which emulator and build is asking (X-OpenPak-Client).
+    {
+        const std::string_view hash{Common::g_scm_rev};
+        const std::string version{Common::g_build_version};
+        openpak::Platform::SetClient("eden", version.empty()
+                                                 ? std::string{hash.substr(0, 8)}
+                                                 : fmt::format("{}+{}", version, hash.substr(0, 8)));
+    }
     openpak_host = new OpenPakHost(*QtCommon::system, this, this);
     openpak::qt::Host::SetCurrent(openpak_host);
     // MyPage's "invite friends": the library's picker, driven by mouse, keyboard or controller.
