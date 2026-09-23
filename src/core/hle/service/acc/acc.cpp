@@ -51,8 +51,14 @@ constexpr std::size_t THUMBNAIL_SIZE = 0x24000;
 // online play must not race a sign-in, and the chain answers in well under a second on a server
 // that is there. When it is not, this returns nothing and the caller keeps the old stub, which
 // is a console that is simply not online.
-static bool OpenPakSignedIn(Core::System& system) {
+static bool OpenPakSignedIn(Core::System& system, const Common::UUID& user) {
     if (!Settings::values.enable_openpak.GetValue()) {
+        return false;
+    }
+
+    // The OpenPak account is the active profile's. Any other profile a title asks about -- a
+    // second local player -- is offline, never handed the active one's identity.
+    if (user.RawString() != openpak::Platform::ProfileId()) {
         return false;
     }
 
@@ -93,8 +99,8 @@ static bool OpenPakSignedIn(Core::System& system) {
     return openpak::client::session::Ensure();
 }
 
-static std::vector<u8> OpenPakIdTokenBytes(Core::System& system) {
-    if (!OpenPakSignedIn(system)) {
+static std::vector<u8> OpenPakIdTokenBytes(Core::System& system, const Common::UUID& user) {
+    if (!OpenPakSignedIn(system, user)) {
         return {};
     }
 
@@ -571,7 +577,7 @@ protected:
     }
 
     void LoadIdTokenCache(HLERequestContext& ctx) {
-        std::vector<u8> token_data = OpenPakIdTokenBytes(system);
+        std::vector<u8> token_data = OpenPakIdTokenBytes(system, user_id);
 
         if (token_data.empty()) {
             LOG_WARNING(Service_ACC, "(STUBBED) called");
@@ -758,10 +764,11 @@ protected:
 class IManagerForApplication final : public ServiceFramework<IManagerForApplication> {
 public:
     explicit IManagerForApplication(Core::System& system_,
-                                    const std::shared_ptr<ProfileManager>& profile_manager_)
+                                    const std::shared_ptr<ProfileManager>& profile_manager_,
+                                    Common::UUID user_id_)
         : ServiceFramework{system_, "IManagerForApplication"},
           ensure_token_id{std::make_shared<EnsureTokenIdCacheAsyncInterface>(system)},
-          profile_manager{profile_manager_} {
+          profile_manager{profile_manager_}, user_id{user_id_} {
         // clang-format off
         static const FunctionInfo functions[] = {
             {0, &IManagerForApplication::CheckAvailability, "CheckAvailability"},
@@ -793,7 +800,7 @@ private:
         // [OpenPak] The network service account id has to be the one the id_token was issued for,
         // or a title asks a server about a player nobody has heard of. The local profile hash is
         // what stands in when there is no OpenPak identity.
-        const u64 nsa_id = OpenPakSignedIn(system)
+        const u64 nsa_id = OpenPakSignedIn(system, user_id)
                                ? openpak::client::session::NetworkServiceAccountId()
                                : 0;
 
@@ -821,7 +828,7 @@ private:
         // command 4); the other one in this file serves a different interface. A title handed
         // 0x100 zero bytes here throws where it parses them: Stardew aborts with 2162-0001
         // before it opens a single socket.
-        std::vector<u8> token_data = OpenPakIdTokenBytes(system);
+        std::vector<u8> token_data = OpenPakIdTokenBytes(system, user_id);
 
         if (token_data.empty()) {
             LOG_WARNING(Service_ACC, "(STUBBED) called");
@@ -866,6 +873,7 @@ private:
 
     std::shared_ptr<EnsureTokenIdCacheAsyncInterface> ensure_token_id{};
     std::shared_ptr<ProfileManager> profile_manager;
+    Common::UUID user_id; ///< The user the title asked about; OpenPak speaks for the active one only.
 };
 
 // 6.0.0+
@@ -1078,10 +1086,12 @@ Result Module::Interface::InitializeApplicationInfoBase() {
 }
 
 void Module::Interface::GetBaasAccountManagerForApplication(HLERequestContext& ctx) {
-    LOG_DEBUG(Service_ACC, "called");
+    IPC::RequestParser rp{ctx};
+    const auto uuid = rp.PopRaw<Common::UUID>();
+    LOG_DEBUG(Service_ACC, "called, uuid=0x{}", uuid.RawString());
     IPC::ResponseBuilder rb{ctx, 2, 0, 1};
     rb.Push(ResultSuccess);
-    rb.PushIpcInterface<IManagerForApplication>(ctx, system, profile_manager);
+    rb.PushIpcInterface<IManagerForApplication>(ctx, system, profile_manager, uuid);
 }
 
 void Module::Interface::IsUserAccountSwitchLocked(HLERequestContext& ctx) {
@@ -1283,22 +1293,20 @@ void Module::Interface::TrySelectUserWithoutInteractionDeprecated(HLERequestCont
     // A u8 is passed into this function which we can safely ignore. It's to determine if we have
     // access to use the network or not by the looks of it
     IPC::ResponseBuilder rb{ctx, 6};
-    if (profile_manager->GetUserCount() != 1) {
-        rb.Push(ResultSuccess);
-        rb.PushRaw(Common::InvalidUUID);
-        return;
-    }
 
-    const auto user_list = profile_manager->GetAllUsers();
-    if (std::ranges::all_of(user_list, [](const auto& user) { return user.IsInvalid(); })) {
+    // [OpenPak] The profile in use, whatever the count: it is chosen when the emulator opens, and
+    // the OpenPak identity and cloud saves follow it, so a title that picks silently must pick
+    // the same one rather than ask again or take the first.
+    const auto current = profile_manager->GetUser(
+        static_cast<std::size_t>(Settings::values.current_user.GetValue()));
+    if (!current || current->IsInvalid()) {
         rb.Push(ResultUnknown); // TODO(ogniK): Find the correct error code
         rb.PushRaw(Common::InvalidUUID);
         return;
     }
 
-    // Select the first user we have
     rb.Push(ResultSuccess);
-    rb.PushRaw(profile_manager->GetUser(0)->uuid);
+    rb.PushRaw(*current);
 }
 
 void Module::Interface::TrySelectUserWithoutInteraction(HLERequestContext& ctx) {
@@ -1306,22 +1314,20 @@ void Module::Interface::TrySelectUserWithoutInteraction(HLERequestContext& ctx) 
     // A u8 is passed into this function which we can safely ignore. It's to determine if we have
     // access to use the network or not by the looks of it
     IPC::ResponseBuilder rb{ctx, 6};
-    if (profile_manager->GetUserCount() != 1) {
-        rb.Push(ResultSuccess);
-        rb.PushRaw(Common::InvalidUUID);
-        return;
-    }
 
-    const auto user_list = profile_manager->GetAllUsers();
-    if (std::ranges::all_of(user_list, [](const auto& user) { return user.IsInvalid(); })) {
+    // [OpenPak] The profile in use, whatever the count: it is chosen when the emulator opens, and
+    // the OpenPak identity and cloud saves follow it, so a title that picks silently must pick
+    // the same one rather than ask again or take the first.
+    const auto current = profile_manager->GetUser(
+        static_cast<std::size_t>(Settings::values.current_user.GetValue()));
+    if (!current || current->IsInvalid()) {
         rb.Push(ResultUnknown); // TODO(ogniK): Find the correct error code
         rb.PushRaw(Common::InvalidUUID);
         return;
     }
 
-    // Select the first user we have
     rb.Push(ResultSuccess);
-    rb.PushRaw(profile_manager->GetUser(0)->uuid);
+    rb.PushRaw(*current);
 }
 
 Module::Interface::Interface(std::shared_ptr<Module> module_,

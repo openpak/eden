@@ -38,6 +38,7 @@
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/physical_core.h"
 #include "core/hle/service/acc/profile_manager.h"
+#include "openpak/platform.h"
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/am/frontend/applets.h"
 #include "core/hle/service/am/process_creation.h"
@@ -111,7 +112,14 @@ FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
 struct System::Impl {
     explicit Impl(System& system)
         : kernel{system}, fs_controller{system}, hid_core{kernel}, cpu_manager{system},
-          reporter{system}, applet_manager{system}, frontend_applets{system}, profile_manager{} {}
+          reporter{system}, applet_manager{system}, frontend_applets{system}, profile_manager{} {
+        // [OpenPak] Each profile is its own OpenPak account; the client asks which is active.
+        openpak::Platform::SetProfileSource([this] { return profile_manager.CurrentUserKey(); });
+    }
+
+    ~Impl() {
+        openpak::Platform::SetProfileSource({});
+    }
 
     u64 program_id;
 

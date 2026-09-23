@@ -20,5 +20,18 @@ Branch layout: `main` carries the redirect, the CI and the on-by-default switch;
 identity and account, and the title online path itself (nsd, ports, sockets, ALPN; BSD
 deferral, v6 and sockopt repairs; NPLN worker freeze tracing).
 
+Profiles: each Eden user profile is its own OpenPak account, one active at a time
+(`emulators/prds/emulator-integration-prd.md` §3.1). The shared client asks the core which profile
+is current (`openpak::Platform::SetProfileSource`, set by `Core::System`) and keeps the account
+file (`openpak/account-<uuid>.txt`) and device account (`openpak/device-<server>-<uuid>.json`)
+per profile; a switch takes the old account offline and signs the new one in. A plain launch runs
+`OpenPakHost::RunStartup`: *Tools → OpenPak account at startup* (last used, ask, or one profile),
+then, once ever, the setup (*Sign in with OpenPak*, *Create an account*, *Play offline* with a
+name). Signing in there copies the account's name and avatar into the profile once; the old
+every-launch sync is gone. `acc` answers only the current profile with the OpenPak identity,
+`TrySelectUserWithoutInteraction` picks the current profile, and a title's own profile picker is
+skipped unless it rules profiles out. One account links to one profile; deleting a profile forgets
+its account. The single account file from before moves to the profile open at the first launch.
+
 PRDs: [`../prds/`](../prds/README.md) — emulator-wide PRDs live at `emulators/prds/` in the
 workspace; this fork is milestone E1 of `emulator-integration-prd.md`.
