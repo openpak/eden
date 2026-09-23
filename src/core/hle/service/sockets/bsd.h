@@ -152,6 +152,7 @@ private:
     void GetPeerName(HLERequestContext& ctx);
     void GetSockName(HLERequestContext& ctx);
     void GetSockOpt(HLERequestContext& ctx);
+    void Sysctl(HLERequestContext& ctx);
     void Listen(HLERequestContext& ctx);
     void Fcntl(HLERequestContext& ctx);
     void SetSockOpt(HLERequestContext& ctx);

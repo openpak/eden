@@ -23,11 +23,13 @@ enum class Errno : u32 {
     SUCCESS = 0,
     BADF = 9,
     AGAIN = 11,
+    NOMEM = 12,
     INVAL = 22,
     MFILE = 24,
     PIPE = 32,
     MSGSIZE = 90,
     NOPROTOOPT = 92, // an option this build cannot answer, said the way hardware says it
+    OPNOTSUPP = 95,
     CONNABORTED = 103,
     CONNRESET = 104,
     NOTCONN = 107,
