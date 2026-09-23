@@ -20,8 +20,11 @@
 #include "network/network.h"
 #include "qt_common/discord/discord.h"
 #include "yuzu/openpak_host.h"
+#include <future>
+#include <thread>
 #include "openpak/log.h"
 #include "openpak/platform.h"
+#include "openpak/session.h"
 #include "openpak/qt/account_dialog.h"
 #include "ui_main.h"
 
@@ -4576,6 +4579,20 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     render_window->close();
     multiplayer_state->Close();
     QtCommon::system->HIDCore().UnloadInputDevices();
+
+    // OpenPak: say we are going, so friends see us leave now rather than when the presence
+    // lease lapses. Waited on for three seconds at most, as Ryujinx does; a crash or a kill is
+    // covered by the lease instead.
+    {
+        auto said = std::make_shared<std::promise<void>>();
+        auto done = said->get_future();
+        std::thread{[said] {
+            openpak::client::session::GoOffline();
+            said->set_value();
+        }}.detach();
+        done.wait_for(std::chrono::seconds(3));
+    }
+
     Network::Shutdown();
 
     QWidget::closeEvent(event);
