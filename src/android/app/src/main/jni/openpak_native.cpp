@@ -90,6 +90,11 @@ jstring Java_org_yuzu_yuzu_1emu_utils_OpenPak_nativeSignIn(JNIEnv* env, jobject,
                                                : website.error);
     }
 
+    // Kept, as the desktop build keeps it: every later website call reads the account from here,
+    // and the guest's friend list is only refreshed while one is stored.
+    Common::OpenPakAccount::Save(website.pid, website.username, website.friend_code, website.token,
+                                 website.bearer);
+
     // And the console chain, which is what puts an identity in front of a title server.
     const std::string failure = openpak::client::session::LinkWithPassword(email, password);
 

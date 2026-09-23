@@ -625,6 +625,13 @@ void OpenPakHost::AskAndSignIn(bool adopt, const QString& intro, const QString& 
 }
 
 void OpenPakHost::SignOut() {
+    // The website token is revoked on the server, not only forgotten here, as Ryujinx does. The
+    // console link stays: signing out of the website does not unlink a Switch either.
+#ifdef ENABLE_WEB_SERVICE
+    std::thread{[bearer = Common::OpenPakAccount::GetBearer()] {
+        WebService::OpenPakApi::RevokeToken(bearer);
+    }}.detach();
+#endif
     Common::OpenPakAccount::Clear();
     Common::NextendoFriends::Set({});
     last_known_status.clear();
@@ -943,23 +950,26 @@ std::filesystem::path OpenPakHost::ModDirectory(u64 title_id) {
 }
 
 std::filesystem::path OpenPakHost::SaveDirectory(u64 title_id) {
-    // nand/user/save/0000000000000000/<user>/<TITLEID>, the same walk Citron's
-    // SaveDataFactory::GetTitleSaveDirectory does, on the real directory.
-    const auto root = Common::FS::GetEdenPath(Common::FS::EdenPath::NANDDir) / "user" / "save" / "0000000000000000";
+    // nand/user/save/0000000000000000/<user>/<TITLEID>, the path SaveDataFactory::GetFullPath
+    // builds. The active profile's own, because the cloud save belongs to the account that
+    // profile is signed in as: another profile's folder would upload somebody else's progress.
+    // A title with only a device save (ACNH) keeps it under the all-zero user, as on a console.
+    const auto root = Common::FS::GetEdenPath(Common::FS::EdenPath::NANDDir) / "user" / "save" /
+                      "0000000000000000";
     const std::string title = fmt::format("{:016X}", title_id);
-    std::error_code ec;
-    if (!std::filesystem::is_directory(root, ec)) {
+    const auto current = CurrentUser();
+    if (!current || current->IsInvalid()) {
         return {};
     }
-    for (const auto& profile : std::filesystem::directory_iterator(root, ec)) {
-        if (!profile.is_directory(ec)) {
-            continue;
-        }
-        if (std::filesystem::is_directory(profile.path() / title, ec)) {
-            return profile.path() / title;
-        }
+    const auto id = current->AsU128();
+    const auto own = root / fmt::format("{:016X}{:016X}", id[1], id[0]) / title;
+    const auto device = root / std::string(32, '0') / title;
+
+    std::error_code ec;
+    if (!std::filesystem::is_directory(own, ec) && std::filesystem::is_directory(device, ec)) {
+        return device;
     }
-    return {};
+    return own;
 }
 
 QString OpenPakHost::AccentColor() const {
