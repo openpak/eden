@@ -8,6 +8,7 @@
 #endif
 
 #include <boost/algorithm/string/split.hpp>
+#include "common/fs/fs_paths.h"
 #include "common/fs/path_util.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
@@ -26,6 +27,7 @@
 #include <QPointer>
 #include <future>
 #include <thread>
+#include "openpak/crash_reports.h"
 #include "openpak/log.h"
 #include "openpak/platform.h"
 #include "openpak/session.h"
@@ -1038,6 +1040,14 @@ void MainWindow::InitializeWidgets() {
         openpak::Platform::SetClient("eden", version.empty()
                                                  ? std::string{hash.substr(0, 8)}
                                                  : fmt::format("{}+{}", version, hash.substr(0, 8)));
+    }
+    // Crash reports: saved on a crash, offered at the next launch (OpenPakHost::RunStartup), sent
+    // only with consent. Here, before any game boots, so the JIT's fastmem handler goes in on top
+    // of this one and still sees its own faults first.
+    if (Settings::values.enable_openpak.GetValue()) {
+        openpak::CrashReports::Install(
+            {"eden", std::string{Common::g_build_version},
+             Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / LOG_FILE});
     }
     openpak_host = new OpenPakHost(*QtCommon::system, this, this);
     openpak::qt::Host::SetCurrent(openpak_host);
@@ -2059,6 +2069,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     // OpenPak: the newest cloud save, before the title reads the one on disk.
     openpak_host->PullSaveBeforeLaunch(title_id);
     openpak_title_id = title_id;
+    openpak::CrashReports::SetTitleId(title_id);
 
     if (!LoadROM(filename, params)) {
         return;
@@ -2260,6 +2271,7 @@ void MainWindow::OnEmulationStopped() {
 
     // OpenPak: the save the title just wrote goes up, now that nothing is writing to it.
     openpak_host->PushSaveAfterExit(std::exchange(openpak_title_id, 0));
+    openpak::CrashReports::SetTitleId(0);
 
     discord_rpc->Update();
     Common::FeralGamemode::Stop();
