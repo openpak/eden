@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <random>
 #include <array>
 
 #include "common/common_types.h"
@@ -318,23 +319,92 @@ private:
     }
 };
 
+// [OpenPak] An async request that is done before anyone asks: authorization is a local yes.
+class CompletedAsyncContext final : public IAsyncContext {
+public:
+    explicit CompletedAsyncContext(Core::System& system_) : IAsyncContext{system_} {
+        MarkComplete();
+    }
+
+protected:
+    bool IsComplete() const override {
+        return true;
+    }
+    void Cancel() override {}
+    Result GetResult() const override {
+        return ResultSuccess;
+    }
+};
+
+// [OpenPak] nn::account::nas::IAuthorizationRequest, ported from Ryujinx: the title-driven half of
+// the console authorization flow. A title that talks to a third-party network (Battle.net for
+// Diablo II: Resurrected) asks the account system to authorize it against the signed-in user, then
+// collects the proof -- an authorization code or the id_token -- to hand to that network. The user
+// is already signed in, so there is nothing to interact over: the request completes at once,
+// reports authorized, and both proofs are the session's own id_token, the credential OpenPak's
+// check_token resolves. A network that wants to verify it verifies OpenPak, which is the design.
 class IAuthorizationRequest final : public ServiceFramework<IAuthorizationRequest> {
 public:
-    explicit IAuthorizationRequest(Core::System& system_, Common::UUID)
-        : ServiceFramework{system_, "IAuthorizationRequest"} {
+    explicit IAuthorizationRequest(Core::System& system_, Common::UUID user_)
+        : ServiceFramework{system_, "IAuthorizationRequest"}, user{user_},
+          session_id{std::random_device{}() | (u64{std::random_device{}()} << 32)} {
         // clang-format off
         static const FunctionInfo functions[] = {
-            {0, nullptr, "GetSessionId"},
-            {10, nullptr, "InvokeWithoutInteractionAsync"},
-            {19, nullptr, "IsAuthorized"},
-            {20, nullptr, "GetAuthorizationCode"},
-            {21, nullptr, "GetIdToken"},
-            {22, nullptr, "GetState"},
+            {0, &IAuthorizationRequest::GetSessionId, "GetSessionId"},
+            {10, &IAuthorizationRequest::InvokeWithoutInteractionAsync, "InvokeWithoutInteractionAsync"},
+            {19, &IAuthorizationRequest::IsAuthorized, "IsAuthorized"},
+            {20, &IAuthorizationRequest::GetSessionToken, "GetAuthorizationCode"},
+            {21, &IAuthorizationRequest::GetSessionToken, "GetIdToken"},
+            {22, &IAuthorizationRequest::GetState, "GetState"},
         };
         // clang-format on
 
         RegisterHandlers(functions);
     }
+
+private:
+    void GetSessionId(HLERequestContext& ctx) {
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(ResultSuccess);
+        rb.Push(session_id);
+    }
+
+    void InvokeWithoutInteractionAsync(HLERequestContext& ctx) {
+        IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+        rb.Push(ResultSuccess);
+        rb.PushIpcInterface<CompletedAsyncContext>(ctx, system);
+    }
+
+    void IsAuthorized(HLERequestContext& ctx) {
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u8>(1);
+    }
+
+    // Nothing here fails the call: a title that only wants the size asks with no buffer.
+    void GetSessionToken(HLERequestContext& ctx) {
+        const std::vector<u8> token = OpenPakIdTokenBytes(system, user);
+        if (ctx.CanWriteBuffer() && !token.empty()) {
+            if (token.size() > ctx.GetWriteBufferSize()) {
+                LOG_WARNING(Service_ACC, "[OpenPak] id_token is {} bytes, guest buffer is {}",
+                            token.size(), ctx.GetWriteBufferSize());
+            } else {
+                ctx.WriteBuffer(token);
+            }
+        }
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(static_cast<u32>(token.size()));
+    }
+
+    void GetState(HLERequestContext& ctx) {
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(3); // nn::account::nas::AuthorizationRequestState: Done
+    }
+
+    Common::UUID user;
+    u64 session_id;
 };
 
 class IOAuthProcedure final : public ServiceFramework<IOAuthProcedure> {
@@ -778,7 +848,7 @@ public:
             {4, &IManagerForApplication::LoadIdTokenCache, "LoadIdTokenCache"},
             {130, &IManagerForApplication::GetNintendoAccountUserResourceCacheForApplication, "GetNintendoAccountUserResourceCacheForApplication"},
             {136, &IManagerForApplication::GetNintendoAccountUserResourceCacheForApplication, "GetNintendoAccountUserResourceCache"}, // 19.0.0+
-            {150, nullptr, "CreateAuthorizationRequest"},
+            {150, &IManagerForApplication::CreateAuthorizationRequest, "CreateAuthorizationRequest"},
             {160, &IManagerForApplication::StoreOpenContext, "StoreOpenContext"},
             {170, nullptr, "LoadNetworkServiceLicenseKindAsync"},
         };
@@ -860,6 +930,13 @@ private:
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(ResultSuccess);
         rb.PushRaw<u64>(profile_manager->GetLastOpenedUser().Hash());
+    }
+
+    void CreateAuthorizationRequest(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_ACC, "called");
+        IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+        rb.Push(ResultSuccess);
+        rb.PushIpcInterface<IAuthorizationRequest>(ctx, system, user_id);
     }
 
     void StoreOpenContext(HLERequestContext& ctx) {
