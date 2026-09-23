@@ -196,6 +196,7 @@ void GameListModel::RetranslateUI() {
     setHeaderData(COLUMN_FILE_TYPE, Qt::Horizontal, tr("File type"));
     setHeaderData(COLUMN_SIZE, Qt::Horizontal, tr("Size"));
     setHeaderData(COLUMN_PLAY_TIME, Qt::Horizontal, tr("Play time"));
+    setHeaderData(COLUMN_ONLINE, Qt::Horizontal, tr("Online"));
 }
 
 QFileSystemWatcher* GameListModel::GetWatcher() const {
