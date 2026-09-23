@@ -29,6 +29,8 @@ jobs:
         with:
           fetch-depth: 0
           # openpak-client is a submodule; without it CMake has no OpenPak to build.
+          # openpak-client is private: GITHUB_TOKEN reads only this repo.
+          token: ${{ secrets.OPENPAK_MODULE_TOKEN || github.token }}
           submodules: true
 
       - uses: actions/setup-java@v4
