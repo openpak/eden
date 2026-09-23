@@ -20,7 +20,7 @@
 #include "network/network.h"
 #include "qt_common/discord/discord.h"
 #include "yuzu/openpak_host.h"
-#include "yuzu/openpak_friend_picker.h"
+#include "openpak/qt/friend_picker.h"
 #include "openpak/compatibility.h"
 #include "openpak/qt/toast.h"
 #include <QPointer>
@@ -1032,8 +1032,9 @@ void MainWindow::InitializeWidgets() {
         LOG_INFO(Frontend, "[openpak] {}", message);
     });
     openpak_host = new OpenPakHost(*QtCommon::system, this, this);
-    InstallOpenPakFriendPicker(this);
     openpak::qt::Host::SetCurrent(openpak_host);
+    // MyPage's "invite friends": the library's picker, driven by mouse, keyboard or controller.
+    openpak::qt::InstallFriendPicker(openpak_host, this);
     connect(ui->action_OpenPak_Account, &QAction::triggered, this, [this] {
         OpenPakAccountDialog dialog(openpak_host, this);
         dialog.exec();
