@@ -23,6 +23,9 @@ import org.yuzu.yuzu_emu.databinding.FragmentProfileManagerBinding
 import org.yuzu.yuzu_emu.model.HomeViewModel
 import org.yuzu.yuzu_emu.model.UserProfile
 import org.yuzu.yuzu_emu.utils.NativeConfig
+import org.yuzu.yuzu_emu.utils.OpenPak
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import org.yuzu.yuzu_emu.utils.ViewUtils.updateMargins
 
 class ProfileManagerFragment : Fragment() {
@@ -115,6 +118,9 @@ class ProfileManagerFragment : Fragment() {
     private fun selectProfile(profile: UserProfile) {
         if (NativeLibrary.setCurrentUser(profile.uuid)) {
             loadProfiles()
+            // [OpenPak] Each profile is its own OpenPak account: the old one goes offline and
+            // this one signs in.
+            lifecycleScope.launch { OpenPak.profileChanged() }
         }
     }
 
@@ -148,6 +154,10 @@ class ProfileManagerFragment : Fragment() {
     }
 
     private fun deleteProfile(profile: UserProfile) {
+        // [OpenPak] Its account goes with it: the token is revoked on the server and the device
+        // account forgotten. The cloud saves stay on the account.
+        lifecycleScope.launch { OpenPak.forgetProfile(profile.uuid) }
+
         val currentUser = NativeLibrary.getCurrentUser()
         if (!currentUser.isNullOrEmpty() && profile.uuid == currentUser) {
             val users = NativeLibrary.getAllUsers() ?: emptyArray()
@@ -161,6 +171,7 @@ class ProfileManagerFragment : Fragment() {
 
         if (NativeLibrary.removeUser(profile.uuid)) {
             loadProfiles()
+            lifecycleScope.launch { OpenPak.profileChanged() }
         }
     }
 

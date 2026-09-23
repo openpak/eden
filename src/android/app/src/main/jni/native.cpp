@@ -337,6 +337,11 @@ Core::SystemResultStatus EmulationSession::InitializeEmulation(const std::string
         return m_load_result;
     }
 
+    // [OpenPak] The newest cloud save, before the title reads the one on disk: the title is known
+    // now and has not run a single instruction yet.
+    m_openpak_title = m_system.GetApplicationProcessProgramID();
+    OpenPakPullSaveBeforeLaunch(m_openpak_title);
+
     // Complete initialization.
     m_system.GPU().Start();
     m_system.GetCpuManager().OnGpuReady();
@@ -382,6 +387,8 @@ void EmulationSession::ShutdownEmulation() {
         m_system.ShutdownMainProcess();
         m_load_result = Core::SystemResultStatus::ErrorNotInitialized;
         m_window.reset();
+        // [OpenPak] The save the title just wrote goes up, now that nothing is writing to it.
+        OpenPakPushSaveAfterExit(std::exchange(m_openpak_title, 0));
         OnEmulationStopped(Core::SystemResultStatus::Success);
         return;
     }

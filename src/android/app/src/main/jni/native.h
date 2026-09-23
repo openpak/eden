@@ -99,4 +99,5 @@ private:
     // Program index for next boot
     std::atomic<s32> m_next_program_index = -1;
     std::atomic<u64> m_next_program_id = 0;
+    u64 m_openpak_title = 0; // [OpenPak] the title whose save goes up when it stops
 };

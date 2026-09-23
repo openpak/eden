@@ -24,6 +24,7 @@ import org.yuzu.yuzu_emu.utils.DocumentsTree
 import org.yuzu.yuzu_emu.utils.GpuDriverHelper
 import org.yuzu.yuzu_emu.utils.Log
 import org.yuzu.yuzu_emu.utils.OpenPak
+import org.yuzu.yuzu_emu.utils.OpenPakUi
 import org.yuzu.yuzu_emu.utils.PowerStateUpdater
 import org.yuzu.yuzu_emu.utils.ControllerNavigationGlobalHook
 import java.util.Locale
@@ -74,9 +75,10 @@ class YuzuApplication : Application() {
         NativeLibrary.logDeviceInfo()
         PowerStateUpdater.start()
 
-        // Online before any screen is opened: until this runs the account is offline, invisible to
-        // friends, and hears about no invitation.
-        OpenPak.start()
+        // OpenPak: who is asking and where its files live. Going online waits for the profile to
+        // be chosen (MainActivity) or for a game started straight from a shortcut.
+        OpenPak.init()
+        OpenPakUi.install(this)
 
         Log.logDeviceInfo()
         ControllerNavigationGlobalHook.install(this)

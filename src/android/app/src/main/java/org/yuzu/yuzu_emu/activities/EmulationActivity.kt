@@ -29,6 +29,7 @@ import android.os.Handler
 import android.os.Looper
 import androidx.navigation.NavOptions
 import org.yuzu.yuzu_emu.fragments.EmulationFragment
+import org.yuzu.yuzu_emu.utils.OpenPak
 import org.yuzu.yuzu_emu.utils.CustomSettingsHandler
 import android.util.Rational
 import android.view.InputDevice
@@ -126,6 +127,10 @@ class EmulationActivity : AppCompatActivity(), SensorEventListener, InputManager
         super.onCreate(savedInstanceState)
 
         NativeConfig.reloadGlobalConfig()
+
+        // [OpenPak] Online even when the game was started straight from a shortcut; a no-op when
+        // the game list already went online.
+        OpenPak.start()
 
         InputHandler.updateControllerData()
         val players = NativeConfig.getInputSettings(true)
