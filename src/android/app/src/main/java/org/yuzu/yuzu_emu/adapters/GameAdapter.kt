@@ -238,9 +238,9 @@ class GameAdapter(private val activity: AppCompatActivity) :
                 java.lang.Long.toHexString(programId).padStart(16, '0')
             )
             return when (status) {
-                "live" -> binding.root.context.getString(R.string.openpak_compat_live)
-                "beta" -> binding.root.context.getString(R.string.openpak_compat_beta)
-                "alpha" -> binding.root.context.getString(R.string.openpak_compat_alpha)
+                "live" -> binding.root.context.getString(R.string.openpak_android_compat_live)
+                "beta" -> binding.root.context.getString(R.string.openpak_android_compat_beta)
+                "alpha" -> binding.root.context.getString(R.string.openpak_android_compat_alpha)
                 else -> ""
             }
         }
@@ -253,7 +253,7 @@ class GameAdapter(private val activity: AppCompatActivity) :
             val color = when (OpenPak.compatibility(java.lang.Long.toHexString(programId).padStart(16, '0'))) {
                 "live" -> 0xFF2E7D32.toInt()
                 "beta" -> 0xFFF9A825.toInt()
-                "alpha" -> 0xFF9E9E9E.toInt()
+                "alpha" -> 0xFFE65100.toInt()
                 else -> return title
             }
             return android.text.SpannableString("\u25cf $title").apply {
