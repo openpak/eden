@@ -2011,6 +2011,10 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     // behavior of asking.
     user_flag_cmd_line = false;
 
+    // OpenPak: the newest cloud save, before the title reads the one on disk.
+    openpak_host->PullSaveBeforeLaunch(title_id);
+    openpak_title_id = title_id;
+
     if (!LoadROM(filename, params)) {
         return;
     }
@@ -2208,6 +2212,9 @@ void MainWindow::OnEmulationStopped() {
     }
 
     emulation_running = false;
+
+    // OpenPak: the save the title just wrote goes up, now that nothing is writing to it.
+    openpak_host->PushSaveAfterExit(std::exchange(openpak_title_id, 0));
 
     discord_rpc->Update();
     Common::FeralGamemode::Stop();
