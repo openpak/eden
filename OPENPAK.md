@@ -106,6 +106,21 @@ Settings: `enable_openpak`, `openpak_server_ip`, `openpak_nat_ip`. Environment o
 tracing: `EDEN_SSL_TRACE=1` (guest TLS in the clear), `SSLKEYLOGFILE`,
 `OPENPAK_TRACE_GUEST_FAULT`.
 
+## Android
+
+The same library and core behind native Material screens, as `emulators/prds/openpak-ux-spec.md`
+§4 has them: Kotlin `utils/OpenPak.kt` (the bridge and the poll), `utils/OpenPakUi.kt` (startup
+profile choice, first run, full-screen sign-in, sign-out confirmation, friend picker, invitation
+prompt, conflict sheet, snackbars and notifications) and `fragments/OpenPakFragment.kt` (the
+OpenPak home, the seven sections and the OpenPak settings), over one JSON bridge
+`jni/openpak_native.cpp` (`nativeCall(method, args)`). Entry points: the first row of Settings,
+the in-game menu, and a notification's tap. Cloud saves are pulled in `InitializeEmulation` and
+pushed in `ShutdownEmulation` (`jni/native.cpp`). The strings are the spec's table,
+`res/values/openpak_strings.xml`. Citron's Android carries the same files, package names aside.
+
+Every request says which build asks: `X-OpenPak-Client: eden/<version>+<hash>`
+(`openpak::Platform::SetClient`, desktop and Android).
+
 ## Builds and releases
 
 `openpak-v*` tags publish a GitHub release from the fork's own tag namespace: the Android APK
