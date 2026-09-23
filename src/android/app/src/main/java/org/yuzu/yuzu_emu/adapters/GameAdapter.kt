@@ -237,7 +237,12 @@ class GameAdapter(private val activity: AppCompatActivity) :
             val status = OpenPak.compatibility(
                 java.lang.Long.toHexString(programId).padStart(16, '0')
             )
-            return if (status.isEmpty()) "" else "OpenPak $status"
+            return when (status) {
+                "live" -> binding.root.context.getString(R.string.openpak_compat_live)
+                "beta" -> binding.root.context.getString(R.string.openpak_compat_beta)
+                "alpha" -> binding.root.context.getString(R.string.openpak_compat_alpha)
+                else -> ""
+            }
         }
 
         /** The title with a coloured dot in front where OpenPak serves it: green live, amber beta, grey alpha. */
