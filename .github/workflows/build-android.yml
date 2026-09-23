@@ -5,10 +5,7 @@ name: Build Eden (Android)
 
 on:
   push:
-    branches: [main]
-    tags: ['openpak-v*']
-    # A CI or docs tweak doesn't need a 50-minute arm64 rebuild.
-    paths-ignore: ['.github/**', 'README.md']
+    tags: ['v*.*.*']
   workflow_dispatch:
 
 jobs:
@@ -66,7 +63,7 @@ jobs:
           path: artifacts/*
 
       - name: Release
-        if: startsWith(github.ref, 'refs/tags/openpak-v')
+        if: startsWith(github.ref, 'refs/tags/v')
         # The self-hosted job runs in a container without the gh CLI; the action needs nothing.
         uses: softprops/action-gh-release@v2
         with:

@@ -137,7 +137,7 @@ Every request says which build asks: `X-OpenPak-Client: eden/<version>+<hash>`
 
 ## Builds and releases
 
-`openpak-v*` tags publish a GitHub release from the fork's own tag namespace: the Android APK
+`vX.Y.Z` tags (`v*.*.*`) publish a GitHub release (upstream's tags are never pushed here): the Android APK
 (`.github/workflows/build-android.yml`) and the Linux AppImage
 (`.github/workflows/build-linux.yml`), both attached to the same release without artifacts.
 `.forgejo/workflows` carries upstream's non-build checks. Windows and macOS desktop builds are

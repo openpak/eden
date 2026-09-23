@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # The desktop Linux build of a release: an x86_64 AppImage (and the same tree as a tar.zst),
-# attached to the openpak-v* release that the Android workflow publishes for the same tag.
+# attached to the vX.Y.Z release that the Android workflow publishes for the same tag.
 # It is built the way Citron's Linux nightly is: the pkgforge Arch container on the self-hosted
 # runner, installed to /usr, then bundled with quick-sharun and uruntime2appimage.
 # Nothing passes through artifacts: the organisation's artifact quota filled up and stopped
@@ -11,11 +11,11 @@ name: Build Eden (Linux)
 
 on:
   push:
-    tags: ['openpak-v*']
+    tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to build and attach to (empty: the latest openpak-v* release)'
+        description: 'Release tag to build and attach to (empty: the latest vX.Y.Z release)'
         required: false
         default: ''
 
@@ -45,10 +45,10 @@ jobs:
             tag=$GITHUB_REF_NAME
           else
             tag=$(gh release list --repo "$REPO" --limit 100 --exclude-drafts --json tagName,createdAt \
-              -q '[.[] | select(.tagName | startswith("openpak-v"))] | sort_by(.createdAt) | last | .tagName // ""')
+              -q '[.[] | select(.tagName | test("^v[0-9]+\\.[0-9]+\\.[0-9]+"))] | sort_by(.createdAt) | last | .tagName // ""')
           fi
           if [ -z "$tag" ]; then
-            echo "::error::No openpak-v* release found; pass the tag input."
+            echo "::error::No vX.Y.Z release found; pass the tag input."
             exit 1
           fi
           if ! gh api "repos/$REPO/git/ref/tags/$tag" >/dev/null; then
