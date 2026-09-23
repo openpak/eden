@@ -79,6 +79,10 @@ class YuzuApplication : Application() {
         // be chosen (MainActivity) or for a game started straight from a shortcut.
         OpenPak.init()
         OpenPakUi.install(this)
+        OpenPakUi.openScreen = { activity, page ->
+            org.yuzu.yuzu_emu.fragments.OpenPakFragment.newInstance(page)
+                .show(activity.supportFragmentManager, org.yuzu.yuzu_emu.fragments.OpenPakFragment.TAG)
+        }
 
         Log.logDeviceInfo()
         ControllerNavigationGlobalHook.install(this)
