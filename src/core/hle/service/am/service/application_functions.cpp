@@ -511,12 +511,20 @@ Result IApplicationFunctions::TryPopFromFriendInvitationStorageChannel(
 
     auto& channel = m_applet->friend_invitation_storage_channel;
 
+    // [OpenPak] Oldest first, and the event stays signalled only while something is still
+    // queued, so a title waiting on it wakes once per invitation (as Ryujinx does).
+    m_applet->friend_invitation_storage_channel_event.Clear(system.Kernel());
+
     if (channel.empty()) {
         return AM::ResultNoDataInChannel;
     }
 
-    auto data = channel.back();
-    channel.pop_back();
+    auto data = std::move(channel.front());
+    channel.erase(channel.begin());
+
+    if (!channel.empty()) {
+        m_applet->friend_invitation_storage_channel_event.Signal(system.Kernel());
+    }
 
     *out_storage = std::make_shared<IStorage>(system, std::move(data));
     R_SUCCEED();

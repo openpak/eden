@@ -125,6 +125,8 @@ private:
     QWidget* main_window;
     QTimer friend_poll_timer;
     QTimer invitation_poll_timer;
+    std::set<std::string> offered_invitations;   // asked Join/Ignore, or answered
+    std::set<std::string> announced_invitations; // said once, waiting for their game to run
     std::map<u64, s32> last_known_status;
     std::map<u64, int> offline_streak; // consecutive polls seen offline, not yet confirmed
     std::set<u64> last_known_requests;
