@@ -20,6 +20,7 @@
 #include "network/network.h"
 #include "qt_common/discord/discord.h"
 #include "yuzu/openpak_host.h"
+#include "yuzu/openpak_friend_picker.h"
 #include <future>
 #include <thread>
 #include "openpak/log.h"
@@ -1028,6 +1029,7 @@ void MainWindow::InitializeWidgets() {
         LOG_INFO(Frontend, "[openpak] {}", message);
     });
     openpak_host = new OpenPakHost(*QtCommon::system, this, this);
+    InstallOpenPakFriendPicker(this);
     openpak::qt::Host::SetCurrent(openpak_host);
     connect(ui->action_OpenPak_Account, &QAction::triggered, this, [this] {
         OpenPakAccountDialog dialog(openpak_host, this);
