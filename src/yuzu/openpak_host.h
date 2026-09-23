@@ -59,6 +59,10 @@ public:
     void ProfileMaybeChanged();
     // The "account at startup" choice: last used, ask, or one profile.
     QMenu* CreateStartupMenu(QWidget* parent);
+    // The OpenPak menu (UX spec §3.1). open_window opens the account window at a page;
+    // open_settings the host's settings where OpenPak's live.
+    void PopulateMenu(QMenu* menu, std::function<void(int)> open_window,
+                      std::function<void()> open_settings);
     void SignOut() override;
     // Cloud saves as Ryujinx does them: the newest cloud copy before the title boots (blocking,
     // a few seconds at most), the local copy up once it has stopped.
