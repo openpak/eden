@@ -36,6 +36,7 @@ public:
         COLUMN_SIZE,
         COLUMN_PLAY_TIME,
         COLUMN_ADD_ONS,
+        COLUMN_ONLINE, // [OpenPak] how far the network serves the title's online play
         COLUMN_COUNT,
     };
 
