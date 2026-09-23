@@ -46,6 +46,7 @@ private:
     void IsAnyInternetRequestAccepted(HLERequestContext& ctx);
     void IsAnyForegroundRequestAccepted(HLERequestContext& ctx);
     void SetExclusiveClient(HLERequestContext& ctx);
+    void AcceptSetting(HLERequestContext& ctx);
     void GetSsidListVersion(HLERequestContext& ctx);
     void GetScanDataV2(HLERequestContext& ctx);
     void ConfirmSystemAvailability(HLERequestContext& ctx);
