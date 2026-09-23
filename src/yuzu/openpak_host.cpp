@@ -51,6 +51,7 @@
 #include "openpak/session.h"
 #include "openpak/qt/chat_client.h"
 #include "yuzu/openpak_host.h"
+#include "yuzu/util/controller_navigation.h"
 #include "openpak/qt/save_sync.h"
 #include "openpak/qt/sign_in_dialog.h"
 #include "yuzu/game/game_list.h"
@@ -59,6 +60,48 @@
 #ifdef ENABLE_WEB_SERVICE
 #include "openpak/api.h"
 #endif
+
+namespace {
+
+// Eden's controller navigation -- player one's pad, or the handheld's, turned into the keys the
+// upstream applet dialogs use -- handed to the shared dialogs through the library's Navigation.
+// The key signal comes from the input thread; the connections below queue it onto the UI thread.
+class EdenNavigation final : public openpak::qt::Navigation {
+public:
+    EdenNavigation(Core::HID::HIDCore& hid_core, QWidget* owner) : Navigation(owner) {
+        // Upstream's ControllerNavigation takes a parent but never adopts it.
+        auto* source = new ControllerNavigation(hid_core, owner);
+        source->setParent(this);
+        connect(source, &ControllerNavigation::TriggerKeyboardEvent, this, [this](Qt::Key key) {
+            switch (key) {
+            case Qt::Key_Up:
+                emit navigated(0, -1);
+                break;
+            case Qt::Key_Down:
+                emit navigated(0, 1);
+                break;
+            case Qt::Key_Left:
+                emit navigated(-1, 0);
+                break;
+            case Qt::Key_Right:
+                emit navigated(1, 0);
+                break;
+            case Qt::Key_Enter:
+                emit activated();
+                break;
+            case Qt::Key_Escape:
+                emit cancelled();
+                emit backPressed();
+                break;
+            default:
+                break;
+            }
+            emit activityDetected();
+        }, Qt::QueuedConnection);
+    }
+};
+
+} // namespace
 
 OpenPakHost::OpenPakHost(Core::System& system_, QWidget* main_window_,
                                        QObject* parent)
@@ -1067,6 +1110,10 @@ std::string OpenPakHost::NatIp() const {
 void OpenPakHost::SetGuestInputSuspended(bool) {
     // Eden has no guest-input suspension; the dialog is modal, which is enough.
 }
-openpak::qt::Navigation* OpenPakHost::CreateNavigation(QObject*) {
-    return nullptr; // keyboard and mouse; gamepad navigation comes with a later cut
+openpak::qt::Navigation* OpenPakHost::CreateNavigation(QObject* parent) {
+    auto* owner = qobject_cast<QWidget*>(parent);
+    if (!owner) {
+        return nullptr;
+    }
+    return new EdenNavigation(system.HIDCore(), owner);
 }
