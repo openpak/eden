@@ -21,6 +21,9 @@
 #include "qt_common/discord/discord.h"
 #include "yuzu/openpak_host.h"
 #include "yuzu/openpak_friend_picker.h"
+#include "openpak/compatibility.h"
+#include "openpak/qt/toast.h"
+#include <QPointer>
 #include <future>
 #include <thread>
 #include "openpak/log.h"
@@ -1050,6 +1053,46 @@ void MainWindow::InitializeWidgets() {
     ui->action_OpenPak_Sign_Out->setEnabled(openpak_host->IsLinked());
     ui->menu_Tools->insertMenu(ui->action_OpenPak_Enable_Redirection,
                                openpak_host->CreateStartupMenu(this));
+
+    // OpenPak toasts, as Ryujinx shows them: a friend coming online or starting a game, a friend
+    // request, a game invitation. Friends already online at sign-in are not announced (the host's
+    // first poll is silent).
+    auto* openpak_toast = new NextendoToast(this);
+    const auto toast = [this, openpak_toast](const QString& headline, const QString& detail,
+                                             const QString& avatar, NextendoToast::Kind kind) {
+        if (openpak_host->NotificationsEnabled()) {
+            openpak_toast->Show(headline, detail, avatar, kind);
+        }
+    };
+    connect(openpak_host, &openpak::qt::Host::FriendCameOnline, this,
+            [toast](u64, const QString& name, const QString& game, const QString& avatar) {
+                toast(name, game.isEmpty() ? tr("is online") : tr("is playing %1").arg(game), avatar,
+                      NextendoToast::Kind::Online);
+            });
+    connect(openpak_host, &openpak::qt::Host::FriendRequestReceived, this,
+            [toast](u64, const QString& name, const QString& avatar) {
+                toast(name, tr("sent you a friend request"), avatar, NextendoToast::Kind::Request);
+            });
+    connect(openpak_host, &openpak::qt::Host::FriendInvitationReceived, this,
+            [toast](u64, const QString& name) {
+                toast(name, tr("invited you to play"), {}, NextendoToast::Kind::GameInvite);
+            });
+
+    // What the site says right now about each title's online play, over the list this build
+    // shipped with; the game list is drawn again only when that changes something.
+    std::thread{[self = QPointer<MainWindow>(this)] {
+        if (!openpak::compatibility::Refresh()) {
+            return;
+        }
+        QMetaObject::invokeMethod(
+            qApp,
+            [self] {
+                if (self) {
+                    self->OnGameListRefresh();
+                }
+            },
+            Qt::QueuedConnection);
+    }}.detach();
     multiplayer_state->setVisible(false);
 
     // Create status bar
