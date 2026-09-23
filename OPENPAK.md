@@ -99,13 +99,23 @@ Stardew Valley's NPLN tenant and ACNH:
 
 ## Files and hooks
 
-- `src/yuzu/openpak_host.*` — `OpenPakHost`, the library's `openpak::qt::Host`: titles, saves,
-  settings, navigation, the startup picker and setup, toasts, invitations, cloud-save hooks.
-- `src/yuzu/main_window.cpp`, `main.ui` — creates the host, installs the friend picker, the top-level OpenPak menu as the UX spec has it (`emulators/prds/openpak-ux-spec.md`
-  §3.1, built by `OpenPakHost::PopulateMenu`, identical in Citron): *Sign in to OpenPak...* or
-  *Signed in as {name}*, Friends, Invitations, Cloud saves, Mods, News, Status, *OpenPak
-  settings...*, *OpenPak website*, *Sign out...* (with the §3.5 confirmation). The library's
-  dialogs are the only OpenPak dialogs the build shows.
+- `src/yuzu/openpak_host.*` — `OpenPakHost`, the library's `openpak::qt::Host`, the same file as
+  Citron's but for the lines where the two emulators differ: titles, saves, settings,
+  navigation, the startup picker and setup, the OpenPak window, the toasts (UX spec §3.10: the
+  host owns them; nothing OpenPak goes to the status bar), invitations, cloud-save hooks.
+- `src/yuzu/main_window.cpp`, `main.ui` — creates the host, installs the friend picker, fills the
+  top-level OpenPak menu (`emulators/prds/openpak-ux-spec.md` §3.1, the library's
+  `PopulateOpenPakMenu`): *Sign in to OpenPak...* or *Signed in as {name}*, Friends,
+  Invitations, Cloud saves, Mods, News, Status, *OpenPak settings...* (Configure at its OpenPak
+  page), *OpenPak website*, *Sign out...* (with the §3.5 confirmation). The *Open OpenPak*
+  hotkey (no keyboard default, Home+X on a controller; Change Docked Mode moved to Home+ZL, as in
+  Citron) opens the window at its last page. The library's translations load with Eden's.
+- `src/yuzu/configuration/configure_openpak.*` — Configure → System → OpenPak (§3.13): the
+  library's settings section plus the Server IP and NAT IP fields under Advanced. Settings:
+  `enable_openpak`, `openpak_server_ip`, `openpak_nat_ip`, `openpak_cloud_sync_enabled`, and
+  the UI keys `openpak/notificationsEnabled`, `openpak/notificationCorner`,
+  `openpak/startupProfile`, `openpak/setupOffered` (the same as Citron's; the old QSettings
+  keys are moved over once). The library's dialogs are the only OpenPak dialogs the build shows.
 - `src/core/hle/service/acc/acc.cpp` — the console chain, the active profile, the network
   profile fetch.
 - `src/core/hle/service/friend/openpak_friends.*`, `am/frontend/applet_my_page.*`,
