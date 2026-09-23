@@ -30,6 +30,8 @@
 #include "core/core.h"
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
+#include "openpak/account.h"
+#include "openpak/session.h"
 #include "ui_configure_profile_manager.h"
 #include "yuzu/configuration/configure_profile_manager.h"
 #include "yuzu/util/limitable_input_dialog.h"
@@ -335,6 +337,13 @@ void ConfigureProfileManager::ConfirmDeleteUser() {
 void ConfigureProfileManager::DeleteUser(const int index) {
     if (Settings::values.current_user.GetValue() == tree_view->currentIndex().row()) {
         Settings::values.current_user = 0;
+    }
+
+    // [OpenPak] The profile's OpenPak account and device account go with it: a sign-in outliving
+    // its profile would be an account nobody can see to sign out.
+    if (const auto uuid = profile_manager.GetUser(index)) {
+        Common::OpenPakAccount::Forget(uuid->RawString());
+        openpak::client::session::ForgetProfile(uuid->RawString());
     }
 
     if (!profile_manager.RemoveProfileAtIndex(index)) {

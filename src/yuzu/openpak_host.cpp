@@ -6,8 +6,17 @@
 #include <thread>
 #include <utility>
 
+#include <QActionGroup>
 #include <QByteArray>
 #include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QInputDialog>
+#include <QListWidget>
+#include <QMenu>
+#include <QMessageBox>
+#include <QPushButton>
+#include <QVBoxLayout>
 #include <QDir>
 #include <QFileInfo>
 #include <QImage>
@@ -21,6 +30,8 @@
 
 #include "common/fs/path_util.h"
 #include "common/logging.h"
+#include "common/string_util.h"
+#include "openpak/platform.h"
 #include "openpak/account.h"
 #include "openpak/friends_cache.h"
 #include "core/core.h"
@@ -60,6 +71,12 @@ OpenPakHost::OpenPakHost(Core::System& system_, QWidget* main_window_,
     connect(&invitation_poll_timer, &QTimer::timeout, this, &OpenPakHost::PollInvitations);
     invitation_poll_timer.start();
 
+    active_profile = openpak::Platform::ProfileId();
+}
+
+OpenPakHost::~OpenPakHost() = default;
+
+void OpenPakHost::GoOnline() {
     // [OpenPak] Sign in now rather than when a game first asks. Being online is the point of the
     // integration: until this runs the account is offline, invisible to friends, and hears about
     // no invitation. The chain is walked off the UI thread because a server that is slow to
@@ -92,17 +109,290 @@ OpenPakHost::OpenPakHost(Core::System& system_, QWidget* main_window_,
 
     PollFriends();
     EnsureChatConnected(); // no-op if not already signed in
+}
 
-    // Covers the "already linked, emulator just relaunched" case -- ProfileManager's own
-    // constructor tries this too, but only if it happens to run after this account was
-    // linked, which isn't guaranteed to be true this session, and it never syncs the avatar.
-    if (Common::OpenPakAccount::IsLinked()) {
-        ApplyProfileName(Common::OpenPakAccount::GetUsername());
-        SyncProfileAvatar();
+std::optional<Common::UUID> OpenPakHost::CurrentUser() const {
+    return system.GetProfileManager().GetUser(
+        static_cast<std::size_t>(Settings::values.current_user.GetValue()));
+}
+
+QString OpenPakHost::ProfileName(const std::string& key) const {
+    const auto& profile_manager = system.GetProfileManager();
+
+    for (const auto& uuid : profile_manager.GetAllUsers()) {
+        Service::Account::ProfileBase profile{};
+        if (uuid.IsValid() && uuid.RawString() == key &&
+            profile_manager.GetProfileBase(uuid, profile)) {
+            return QString::fromStdString(Common::StringFromFixedZeroTerminatedBuffer(
+                reinterpret_cast<const char*>(profile.username.data()), profile.username.size()));
+        }
+    }
+
+    return QString::fromStdString(key);
+}
+
+void OpenPakHost::SelectUser(const Common::UUID& uuid) {
+    if (const auto index = system.GetProfileManager().GetUserIndex(uuid)) {
+        Settings::values.current_user = static_cast<s32>(*index);
+    }
+
+    ProfileMaybeChanged();
+}
+
+void OpenPakHost::ProfileMaybeChanged() {
+    const std::string profile = openpak::Platform::ProfileId();
+    if (profile == active_profile) {
+        return;
+    }
+    active_profile = profile;
+
+    // The account service reads the last opened user; it is the current one from here on.
+    if (const auto uuid = CurrentUser()) {
+        system.GetProfileManager().OpenUser(*uuid);
+    }
+
+    // Nothing shown for the last profile's account may be shown as this one's.
+    Common::NextendoFriends::Set({});
+    last_known_status.clear();
+    offline_streak.clear();
+    last_known_requests.clear();
+    first_poll = true;
+    if (chat_client) {
+        chat_client->Disconnect();
+    }
+
+    if (IsLinked()) {
+        emit AccountLinked();
+    } else {
+        emit AccountUnlinked();
+    }
+
+    // The session notices the switch by itself -- the old account goes offline, the new one's
+    // device account signs in -- on whichever of this and the heartbeat asks first.
+    if (Settings::values.enable_openpak.GetValue()) {
+        std::thread{[] { openpak::client::session::Ensure(); }}.detach();
+    }
+
+    PollFriends();
+    EnsureChatConnected();
+}
+
+void OpenPakHost::RunStartup(bool interactive) {
+    if (interactive && Settings::values.enable_openpak.GetValue()) {
+        PickStartupProfile();
+
+        // Set up once, ever, and never over a game that is starting: sign in, create an account,
+        // or play offline -- after which the profile is the person's own either way.
+        if (!IsLinked() && !QSettings().value(QStringLiteral("openpak/asked"), false).toBool()) {
+            QSettings().setValue(QStringLiteral("openpak/asked"), true);
+            RunSetup(false);
+        }
+    }
+
+    GoOnline();
+}
+
+void OpenPakHost::PickStartupProfile() {
+    auto& profile_manager = system.GetProfileManager();
+    if (profile_manager.GetUserCount() < 2) {
+        return;
+    }
+
+    const QString startup = QSettings().value(QStringLiteral("openpak/startup_profile")).toString();
+
+    if (startup.isEmpty()) {
+        return; // the last used, which current_user already is
+    }
+
+    if (startup != QStringLiteral("ask")) {
+        for (const auto& uuid : profile_manager.GetAllUsers()) {
+            if (uuid.IsValid() && QString::fromStdString(uuid.RawString()) == startup) {
+                SelectUser(uuid);
+            }
+        }
+        return;
+    }
+
+    QDialog dialog(main_window);
+    dialog.setWindowTitle(tr("Who is playing?"));
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* list = new QListWidget;
+    list->setIconSize(QSize(48, 48));
+    layout->addWidget(list);
+
+    const auto current = CurrentUser();
+    for (const auto& uuid : profile_manager.GetAllUsers()) {
+        if (uuid.IsInvalid()) {
+            continue;
+        }
+
+        const std::string key = uuid.RawString();
+        const std::string account = Common::OpenPakAccount::UsernameOf(key);
+        auto* item = new QListWidgetItem(QStringLiteral("%1\n%2").arg(
+            ProfileName(key), account.empty()
+                                  ? tr("Offline")
+                                  : tr("OpenPak: %1").arg(QString::fromStdString(account))));
+        item->setData(Qt::UserRole, QString::fromStdString(key));
+        item->setIcon(QIcon(QString::fromStdString(Common::FS::PathToUTF8String(
+            Common::FS::GetEdenPath(Common::FS::EdenPath::NANDDir) /
+            fmt::format("system/save/8000000000000010/su/avators/{}.jpg",
+                        uuid.FormattedString())))));
+        list->addItem(item);
+
+        if (current && *current == uuid) {
+            list->setCurrentItem(item);
+        }
+    }
+
+    auto* buttons = new QDialogButtonBox;
+    buttons->addButton(tr("Continue"), QDialogButtonBox::AcceptRole);
+    QPushButton* add = buttons->addButton(tr("Add account"), QDialogButtonBox::ActionRole);
+    buttons->addButton(QDialogButtonBox::Cancel);
+    layout->addWidget(buttons);
+
+    bool add_account = false;
+    connect(add, &QPushButton::clicked, &dialog, [&] {
+        add_account = true;
+        dialog.accept();
+    });
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(list, &QListWidget::itemDoubleClicked, &dialog, &QDialog::accept);
+
+    if (dialog.exec() != QDialog::Accepted) {
+        return; // closing it keeps the last used
+    }
+
+    if (add_account) {
+        RunSetup(true);
+        return;
+    }
+
+    if (const auto* item = list->currentItem()) {
+        const std::string key = item->data(Qt::UserRole).toString().toStdString();
+        for (const auto& uuid : profile_manager.GetAllUsers()) {
+            if (uuid.IsValid() && uuid.RawString() == key) {
+                SelectUser(uuid);
+            }
+        }
     }
 }
 
-OpenPakHost::~OpenPakHost() = default;
+void OpenPakHost::RunSetup(bool add_account) {
+    QMessageBox box(main_window);
+    box.setWindowTitle(add_account ? tr("Add an account") : tr("Set up this profile"));
+    box.setText(tr("Sign in to OpenPak to play online: friends, invitations and cloud saves follow "
+                   "this profile. Or keep it offline. You can sign in later from the Tools menu."));
+    QPushButton* sign_in = box.addButton(tr("Sign in with OpenPak"), QMessageBox::AcceptRole);
+    QPushButton* create = box.addButton(tr("Create an account"), QMessageBox::ActionRole);
+    QPushButton* offline = box.addButton(tr("Play offline"), QMessageBox::RejectRole);
+    QPushButton* cancel = add_account ? box.addButton(QMessageBox::Cancel) : nullptr;
+    box.setDefaultButton(sign_in);
+    // The first launch has no cancel: closing it is the offline path, which still asks a name.
+    box.setEscapeButton(add_account ? cancel : offline);
+    box.exec();
+
+    auto* const clicked = box.clickedButton();
+    if (cancel != nullptr && clicked == cancel) {
+        return;
+    }
+
+    auto& profile_manager = system.GetProfileManager();
+
+    if (clicked == offline) {
+        const auto current = CurrentUser();
+        const QString suggested =
+            add_account || !current ? QString{} : ProfileName(current->RawString());
+
+        bool ok = false;
+        const QString name = QInputDialog::getText(main_window, tr("Profile name"), tr("Name:"),
+                                                   QLineEdit::Normal, suggested, &ok)
+                                 .trimmed();
+        if (!ok || name.isEmpty()) {
+            RunSetup(add_account);
+            return;
+        }
+
+        if (add_account) {
+            const auto uuid = Common::UUID::MakeRandom();
+            profile_manager.CreateNewUser(uuid, name.toStdString());
+            profile_manager.WriteUserSaveFile();
+            SelectUser(uuid);
+        } else {
+            ApplyProfileName(name.toStdString());
+        }
+        return;
+    }
+
+    if (clicked == create) {
+        QDesktopServices::openUrl(QUrl(QString::fromStdString(WebService::OpenPakApi::BaseUrl()) +
+                                       QStringLiteral("/register")));
+    }
+
+    // The account is kept under the current profile, so a new one is made current before the
+    // sign-in and taken away again if nobody signs in.
+    const auto previous = CurrentUser();
+    std::optional<Common::UUID> created;
+    if (add_account) {
+        created = Common::UUID::MakeRandom();
+        profile_manager.CreateNewUser(*created, "OpenPak");
+        profile_manager.WriteUserSaveFile();
+        SelectUser(*created);
+    }
+
+    const QString intro =
+        clicked == create
+            ? tr("Finish creating your account in the browser and verify your email, then sign in "
+                 "here.")
+            : QString{};
+
+    AskAndSignIn(true, intro, {}, {}, [this, add_account, created, previous](bool signed_in) {
+        if (signed_in) {
+            return;
+        }
+        if (created) {
+            system.GetProfileManager().RemoveUser(*created);
+            system.GetProfileManager().WriteUserSaveFile();
+            if (previous) {
+                SelectUser(*previous);
+            }
+        }
+        RunSetup(add_account);
+    });
+}
+
+QMenu* OpenPakHost::CreateStartupMenu(QWidget* parent) {
+    auto* menu = new QMenu(tr("OpenPak account at startup"), parent);
+
+    // Rebuilt each time it opens: profiles come and go in the profile manager.
+    connect(menu, &QMenu::aboutToShow, menu, [this, menu] {
+        menu->clear();
+        auto* group = new QActionGroup(menu);
+        const QString chosen =
+            QSettings().value(QStringLiteral("openpak/startup_profile")).toString();
+
+        const auto add = [&](const QString& label, const QString& value) {
+            QAction* action = menu->addAction(label);
+            action->setCheckable(true);
+            action->setChecked(chosen == value);
+            group->addAction(action);
+            connect(action, &QAction::triggered, this, [value] {
+                QSettings().setValue(QStringLiteral("openpak/startup_profile"), value);
+            });
+        };
+
+        add(tr("Last used"), QString{});
+        add(tr("Ask every time"), QStringLiteral("ask"));
+        menu->addSeparator();
+        for (const auto& uuid : system.GetProfileManager().GetAllUsers()) {
+            if (uuid.IsValid()) {
+                add(ProfileName(uuid.RawString()), QString::fromStdString(uuid.RawString()));
+            }
+        }
+    });
+
+    return menu;
+}
 
 bool OpenPakHost::IsLinked() const {
     return Common::OpenPakAccount::IsLinked();
@@ -237,25 +527,20 @@ std::string OpenPakHost::GetLocalAppId() const {
 }
 
 void OpenPakHost::SignIn() {
-    AskAndSignIn(false, {}, {});
+    AskAndSignIn(false, {}, {}, {});
 }
 
-void OpenPakHost::OfferSignInOnce() {
-    // Asked once, ever: "Not now" is an answer, and the OpenPak menu still has Sign in.
-    if (IsLinked() || QSettings().value(QStringLiteral("openpak/asked"), false).toBool()) {
-        return;
-    }
-    QSettings().setValue(QStringLiteral("openpak/asked"), true);
-    AskAndSignIn(true, {}, {});
-}
-
-void OpenPakHost::AskAndSignIn(bool first_run, const QString& error, const QString& last_email) {
+void OpenPakHost::AskAndSignIn(bool adopt, const QString& intro, const QString& error,
+                               const QString& last_email, std::function<void(bool)> done) {
 #ifdef ENABLE_WEB_SERVICE
     // Email and password, asked here on the UI thread; the sign-in itself runs off it. The
     // password goes to OpenPak over TLS and nowhere else: what comes back is a website token
     // and the Switch identity the games see.
-    OpenPakSignInDialog dialog(main_window, first_run, error, last_email);
+    OpenPakSignInDialog dialog(main_window, intro, error, last_email);
     if (dialog.exec() != QDialog::Accepted) {
+        if (done) {
+            done(false);
+        }
         return;
     }
     const QString email = dialog.Email();
@@ -263,8 +548,24 @@ void OpenPakHost::AskAndSignIn(bool first_run, const QString& error, const QStri
     emit StatusChanged(tr("Signing in to OpenPak..."));
 
     QPointer<OpenPakHost> self(this);
-    std::thread{[this, self, email = email.toStdString(), password = password.toStdString()] {
+    std::thread{[this, self, email = email.toStdString(), password = password.toStdString(), adopt,
+                 intro, done] {
         auto login_result = WebService::OpenPakApi::SignIn(email, password);
+
+        // One account, one profile: two profiles on one account would share a cloud-save slot and
+        // overwrite each other's progress. Checked before the console link, which would otherwise
+        // bind this profile's device account to it first.
+        if (login_result.ok) {
+            const std::string holder =
+                Common::OpenPakAccount::HolderOf(login_result.pid, openpak::Platform::ProfileId());
+            if (!holder.empty()) {
+                login_result.ok = false;
+                login_result.error = tr("This OpenPak account is already linked to the profile "
+                                        "\"%1\". Sign in there, or sign that profile out first.")
+                                         .arg(ProfileName(holder))
+                                         .toStdString();
+            }
+        }
 
         // Two sign-ins, because they are two different things: the website account is what
         // friends and cloud saves speak with, and the console chain is what puts an identity in
@@ -280,7 +581,7 @@ void OpenPakHost::AskAndSignIn(bool first_run, const QString& error, const QStri
         QMetaObject::invokeMethod(
             this,
             [this, self, result = std::move(login_result), link_failure,
-             email = QString::fromStdString(email)] {
+             email = QString::fromStdString(email), adopt, intro, done] {
                 if (!self) {
                     return;
                 }
@@ -289,7 +590,7 @@ void OpenPakHost::AskAndSignIn(bool first_run, const QString& error, const QStri
                     emit SignInFinished();
                     // Back to the dialog with the reason on it, rather than a line in the
                     // status bar and a menu to find again.
-                    AskAndSignIn(false, QString::fromStdString(result.error), email);
+                    AskAndSignIn(adopt, intro, QString::fromStdString(result.error), email, done);
                     return;
                 }
                 emit StatusChanged(
@@ -302,14 +603,19 @@ void OpenPakHost::AskAndSignIn(bool first_run, const QString& error, const QStri
 
                 Common::OpenPakAccount::Save(result.pid, result.username, result.friend_code,
                                              result.token, result.bearer);
-                ApplyProfileName(result.username);
-                SyncProfileAvatar();
+                if (adopt) {
+                    ApplyProfileName(result.username);
+                    SyncProfileAvatar();
+                }
                 Common::NextendoFriends::SetLocalStatus(Common::NextendoFriends::PresenceOnline);
                 first_poll = true;
                 emit AccountLinked();
                 emit SignInFinished();
                 RefreshFriendCache();
                 EnsureChatConnected();
+                if (done) {
+                    done(true);
+                }
             },
             Qt::QueuedConnection);
     }}.detach();
@@ -379,10 +685,11 @@ void OpenPakHost::ApplyProfileName(const std::string& name) {
     // rename appeared to silently do nothing (this was the unresolved half of the earlier Balloon
     // World self-profile investigation).
     auto& profile_manager = system.GetProfileManager();
-    const auto uuid = profile_manager.GetLastOpenedUser();
-    if (uuid.IsInvalid()) {
+    const auto current = CurrentUser();
+    if (!current || current->IsInvalid()) {
         return;
     }
+    const auto uuid = *current;
 
     Service::Account::ProfileBase profile{};
     if (!profile_manager.GetProfileBase(uuid, profile)) {
@@ -403,11 +710,11 @@ void OpenPakHost::SyncProfileAvatar() {
     if (!Common::OpenPakAccount::IsLinked()) {
         return;
     }
-    auto& profile_manager = system.GetProfileManager();
-    const auto uuid = profile_manager.GetLastOpenedUser();
-    if (uuid.IsInvalid()) {
+    const auto current = CurrentUser();
+    if (!current || current->IsInvalid()) {
         return;
     }
+    const auto uuid = *current;
     const u64 pid = Common::OpenPakAccount::GetPid();
     std::thread{[this, uuid, pid, guard = QPointer<OpenPakHost>(this)] {
         const std::string b64 = WebService::OpenPakApi::GetAvatarByPid(pid);

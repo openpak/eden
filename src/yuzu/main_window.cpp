@@ -518,6 +518,9 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     QStringList args = QApplication::arguments();
 
     if (args.size() < 2) {
+        // OpenPak: a plain launch is the interactive one -- which profile, set it up the first
+        // time, then online. The rest of this constructor is for launches with arguments.
+        QTimer::singleShot(0, openpak_host, [this] { openpak_host->RunStartup(true); });
         return;
     }
 
@@ -597,11 +600,14 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         }
     }
 
-    // OpenPak: the one-time sign-in offer, once the window is up and nothing is booting.
-    if (!should_launch_setup && game_path.isEmpty() && !should_launch_qlaunch &&
-        !should_launch_hlaunch) {
-        QTimer::singleShot(0, openpak_host, &OpenPakHost::OfferSignInOnce);
-    }
+    // OpenPak: which profile, set it up the first time, then online -- once the window is up.
+    // Only online when something is already booting or a profile was named with -u: nothing is
+    // asked that would stand between a launcher and its game.
+    const bool openpak_interactive = !should_launch_setup && game_path.isEmpty() &&
+                                     !should_launch_qlaunch && !should_launch_hlaunch &&
+                                     !user_flag_cmd_line;
+    QTimer::singleShot(0, openpak_host,
+                       [this, openpak_interactive] { openpak_host->RunStartup(openpak_interactive); });
 }
 
 MainWindow::~MainWindow() {
@@ -676,6 +682,21 @@ void MainWindow::ControllerSelectorRequestExit() {
 
 void MainWindow::ProfileSelectorSelectProfile(
     const Core::Frontend::ProfileSelectParameters& parameters) {
+    // [OpenPak] The profile is chosen when the emulator opens, and the OpenPak identity and cloud
+    // saves follow it, so a title asking which profile to use gets the one in use rather than the
+    // same question twice. A title ruling profiles out -- a second local player picking another --
+    // still asks, as do the creator and editor modes.
+    if (Settings::values.enable_openpak.GetValue() &&
+        parameters.mode == Service::AM::Frontend::UiMode::UserSelector &&
+        std::ranges::all_of(parameters.invalid_uid_list,
+                            [](const Common::UUID& uuid) { return uuid.IsInvalid(); })) {
+        if (const auto uuid = QtCommon::system->GetProfileManager().GetUser(
+                static_cast<std::size_t>(Settings::values.current_user.GetValue()))) {
+            emit ProfileSelectorFinishedSelection(uuid);
+            return;
+        }
+    }
+
     profile_select_applet = new QtProfileSelectionDialog(*QtCommon::system, this, parameters);
     SCOPE_EXIT {
         profile_select_applet->deleteLater();
@@ -1022,6 +1043,8 @@ void MainWindow::InitializeWidgets() {
             [this] { ui->action_OpenPak_Sign_In->setEnabled(true); ui->action_OpenPak_Sign_Out->setEnabled(false); });
     ui->action_OpenPak_Sign_In->setEnabled(!openpak_host->IsLinked());
     ui->action_OpenPak_Sign_Out->setEnabled(openpak_host->IsLinked());
+    ui->menu_Tools->insertMenu(ui->action_OpenPak_Enable_Redirection,
+                               openpak_host->CreateStartupMenu(this));
     multiplayer_state->setVisible(false);
 
     // Create status bar
@@ -1926,6 +1949,7 @@ bool MainWindow::SelectAndSetCurrentUser(
     }
 
     Settings::values.current_user = dialog.GetIndex();
+    openpak_host->ProfileMaybeChanged();
     return true;
 }
 
@@ -3453,6 +3477,11 @@ void MainWindow::OnConfigure() {
             &MainWindow::OnGameListRefresh);
 
     const auto result = configure_dialog.exec();
+
+    // The profile manager page changes the current user as soon as one is picked, applied or
+    // not; each profile is its own OpenPak account.
+    openpak_host->ProfileMaybeChanged();
+
     if (result != QDialog::Accepted && !UISettings::values.configuration_applied &&
         !UISettings::values.reset_to_defaults) {
         // Runs if the user hit Cancel or closed the window, and did not ever press the Apply button
