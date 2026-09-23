@@ -30,6 +30,7 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import org.yuzu.yuzu_emu.HomeNavigationDirections
+import org.yuzu.yuzu_emu.utils.OpenPak
 import org.yuzu.yuzu_emu.NativeLibrary
 import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.YuzuApplication
@@ -155,6 +156,10 @@ class GamesFragment : Fragment() {
             if (it.isNotEmpty()) {
                 setAdapter(it)
             }
+        }
+        // [OpenPak] The site said something about a title's online play this build did not.
+        OpenPak.compatibilityVersion.collect(viewLifecycleOwner) {
+            if (it > 0) gameAdapter.notifyDataSetChanged()
         }
         gamesViewModel.shouldSwapData.collect(
             viewLifecycleOwner,

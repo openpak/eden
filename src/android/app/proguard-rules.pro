@@ -25,3 +25,6 @@
 -dontwarn java.beans.Introspector
 -dontwarn java.beans.VetoableChangeListener
 -dontwarn java.beans.VetoableChangeSupport
+
+# OpenPak: the natives and the MyPage picker the native side calls back by name.
+-keep class org.yuzu.yuzu_emu.utils.OpenPak { *; }

@@ -25,6 +25,7 @@ import org.yuzu.yuzu_emu.HomeNavigationDirections
 import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.YuzuApplication
 import org.yuzu.yuzu_emu.databinding.CardGameListBinding
+import org.yuzu.yuzu_emu.utils.OpenPak
 import org.yuzu.yuzu_emu.databinding.CardGameGridBinding
 import org.yuzu.yuzu_emu.databinding.CardGameCarouselBinding
 import org.yuzu.yuzu_emu.model.Game
@@ -163,7 +164,10 @@ class GameAdapter(private val activity: AppCompatActivity) :
             GameIconUtils.loadGameIcon(model, listBinding.imageGameScreen)
 
             listBinding.textGameTitle.text = model.title.replace("[\\t\\n\\r]+".toRegex(), " ")
-            listBinding.textGameDeveloper.text = model.developer
+            // [OpenPak] The title's online status beside the developer, as the desktop's column.
+            val online = openPakLabel(model)
+            listBinding.textGameDeveloper.text =
+                if (online.isEmpty()) model.developer else "$online \u00b7 ${model.developer}"
 
             listBinding.textGameTitle.marquee()
             listBinding.cardGameList.setOnClickListener { onClick(model) }
@@ -180,7 +184,7 @@ class GameAdapter(private val activity: AppCompatActivity) :
             gridBinding.imageGameScreen.scaleType = ImageView.ScaleType.CENTER_CROP
             GameIconUtils.loadGameIcon(model, gridBinding.imageGameScreen)
 
-            gridBinding.textGameTitle.text = model.title.replace("[\\t\\n\\r]+".toRegex(), " ")
+            gridBinding.textGameTitle.text = withOpenPakDot(model)
 
             gridBinding.textGameTitle.marquee()
             gridBinding.cardGameGrid.setOnClickListener { onClick(model) }
@@ -197,7 +201,7 @@ class GameAdapter(private val activity: AppCompatActivity) :
             gridCompactBinding.imageGameScreenCompact.scaleType = ImageView.ScaleType.CENTER_CROP
             GameIconUtils.loadGameIcon(model, gridCompactBinding.imageGameScreenCompact)
 
-            gridCompactBinding.textGameTitleCompact.text = model.title.replace("[\\t\\n\\r]+".toRegex(), " ")
+            gridCompactBinding.textGameTitleCompact.text = withOpenPakDot(model)
 
             gridCompactBinding.textGameTitleCompact.marquee()
             gridCompactBinding.cardGameGridCompact.setOnClickListener { onClick(model) }
@@ -214,7 +218,7 @@ class GameAdapter(private val activity: AppCompatActivity) :
             carouselBinding.imageGameScreen.scaleType = ImageView.ScaleType.CENTER_CROP
             GameIconUtils.loadGameIcon(model, carouselBinding.imageGameScreen)
 
-            carouselBinding.textGameTitle.text = model.title.replace("[\\t\\n\\r]+".toRegex(), " ")
+            carouselBinding.textGameTitle.text = withOpenPakDot(model)
             carouselBinding.textGameTitle.marquee()
             carouselBinding.cardGameCarousel.setOnClickListener { onClick(model) }
             carouselBinding.cardGameCarousel.setOnLongClickListener { onLongClick(model) }
@@ -224,6 +228,37 @@ class GameAdapter(private val activity: AppCompatActivity) :
 
             // Ensure zero-heighted-full-width cards for carousel
             carouselBinding.root.layoutParams.width = cardSize
+        }
+
+        /** "OpenPak live", "OpenPak beta", "OpenPak alpha", or empty when OpenPak does not serve it. */
+        private fun openPakLabel(model: Game): String {
+            val programId = model.programId.toLongOrNull() ?: return ""
+            if (programId == 0L) return ""
+            val status = OpenPak.compatibility(
+                java.lang.Long.toHexString(programId).padStart(16, '0')
+            )
+            return if (status.isEmpty()) "" else "OpenPak $status"
+        }
+
+        /** The title with a coloured dot in front where OpenPak serves it: green live, amber beta, grey alpha. */
+        private fun withOpenPakDot(model: Game): CharSequence {
+            val title = model.title.replace("[\\t\\n\\r]+".toRegex(), " ")
+            val programId = model.programId.toLongOrNull() ?: return title
+            if (programId == 0L) return title
+            val color = when (OpenPak.compatibility(java.lang.Long.toHexString(programId).padStart(16, '0'))) {
+                "live" -> 0xFF2E7D32.toInt()
+                "beta" -> 0xFFF9A825.toInt()
+                "alpha" -> 0xFF9E9E9E.toInt()
+                else -> return title
+            }
+            return android.text.SpannableString("\u25cf $title").apply {
+                setSpan(
+                    android.text.style.ForegroundColorSpan(color),
+                    0,
+                    1,
+                    android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+            }
         }
 
         fun onClick(game: Game) {

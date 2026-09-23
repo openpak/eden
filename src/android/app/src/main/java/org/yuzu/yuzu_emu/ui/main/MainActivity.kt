@@ -166,6 +166,12 @@ class MainActivity : AppCompatActivity(), ThemeProvider {
         if (!firstTimeSetup && NativeLibrary.isUpdateCheckerEnabled() && BooleanSetting.ENABLE_UPDATE_CHECKS.getBoolean()) {
              checkForUpdates()
         }
+
+        // OpenPak: which profile, set it up the first time, then online. After the first-time
+        // setup instead, when that is still to come (finishSetup).
+        if (savedInstanceState == null && !firstTimeSetup) {
+            OpenPakUi.runStartup(this)
+        }
         setInsets()
         applyFullscreenPreference()
     }
@@ -315,6 +321,7 @@ class MainActivity : AppCompatActivity(), ThemeProvider {
 
     fun finishSetup(navController: NavController) {
         navController.navigate(R.id.action_firstTimeSetupFragment_to_gamesFragment)
+        OpenPakUi.runStartup(this)
     }
 
     private fun setUpNavigation(navController: NavController) {
