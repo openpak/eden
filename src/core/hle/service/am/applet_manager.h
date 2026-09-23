@@ -8,6 +8,9 @@
 
 #include <condition_variable>
 #include <mutex>
+#include <span>
+
+#include "common/uuid.h"
 
 #include "core/hle/service/am/am_types.h"
 
@@ -49,6 +52,11 @@ public:
 
 public:
     void SetWindowSystem(WindowSystem* window_system);
+
+    /// [OpenPak] An accepted invitation, left for the running application as qlaunch leaves it on
+    /// a console (IApplicationAccessor 180): [Uid 0x10][the sender's application data]. False
+    /// when no application is running.
+    bool PushFriendInvitation(const Common::UUID& user, std::span<const u8> application_data);
     [[nodiscard]] WindowSystem* GetWindowSystem() const { return m_window_system; }
 
 private:
