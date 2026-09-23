@@ -14,11 +14,17 @@ on:
 jobs:
   android:
     name: arm64 APK
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, podman]
+    container: ubuntu:24.04
     # Repo default is read-only, and the release step needs to write.
     permissions:
       contents: write
     steps:
+      - name: Bootstrap build container
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq git ca-certificates wget unzip glslang-tools >/dev/null
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -28,13 +34,17 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # Pinned in src/android/app/build.gradle.kts; runners don't ship it.
-      - name: Install NDK
-        run: "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \"ndk;28.2.13676358\""
-
-      # Host-side shader compiler the video_core build shells out to.
-      - name: Install glslang
-        run: sudo apt-get update -qq && sudo apt-get install -y glslang-tools
+      - name: Install Android SDK and NDK
+        run: |
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          mkdir -p "$RUNNER_TEMP/android-sdk/cmdline-tools"
+          unzip -q commandlinetools-linux-11076708_latest.zip -d "$RUNNER_TEMP/android-sdk/cmdline-tools"
+          mv "$RUNNER_TEMP/android-sdk/cmdline-tools/cmdline-tools" "$RUNNER_TEMP/android-sdk/cmdline-tools/latest"
+          echo "ANDROID_HOME=$RUNNER_TEMP/android-sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$RUNNER_TEMP/android-sdk" >> "$GITHUB_ENV"
+          yes | "$RUNNER_TEMP/android-sdk/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$RUNNER_TEMP/android-sdk/cmdline-tools/latest/bin/sdkmanager" \
+            "platform-tools" "platforms;android-36" "ndk;28.2.13676358" "cmake;3.31.6"
 
       - name: Build
         run: ./.ci/android/build.sh -t standard -b Release
