@@ -118,6 +118,8 @@ private:
     void RunSetup(bool add_account);
     void PickStartupProfile();
     std::optional<Common::UUID> CurrentUser() const;
+    // The library's ProfileName() (the active profile) stays visible beside this one.
+    using openpak::qt::Host::ProfileName;
     QString ProfileName(const std::string& key) const;
     void SelectUser(const Common::UUID& uuid);
     void ApplyProfileName(const std::string& name);
