@@ -220,6 +220,20 @@ object OpenPak {
         }
     }
 
+    /** Create ("create", with a name), "select", "rename", "remove" or set the "image" of a profile. */
+    suspend fun profileAction(
+        action: String,
+        uuid: String = "",
+        name: String = "",
+        path: String = ""
+    ): JSONObject =
+        callObject(
+            "profile_action",
+            JSONObject().put("action", action).put("uuid", uuid).put("name", name).put("path", path)
+        )
+
+    suspend fun currentProfile(): Profile? = profiles().firstOrNull { it.current }
+
     /** Sign the current profile in. The JSON carries "error" (empty when it worked). */
     suspend fun signIn(email: String, password: String, adopt: Boolean): JSONObject =
         callObject(

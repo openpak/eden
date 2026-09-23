@@ -544,7 +544,11 @@ void ProfileChanged() {
 
 json Profiles() {
     json out = json::array();
-    const auto& manager = System().GetProfileManager();
+    auto& manager = System().GetProfileManager();
+    if (manager.GetUserCount() == 0) {
+        manager.CreateNewUser(Common::UUID::MakeRandom(), OPENPAK_EMULATOR_NAME);
+        manager.WriteUserSaveFile();
+    }
     const auto current = CurrentUser();
     for (const auto& uuid : manager.GetAllUsers()) {
         if (uuid.IsInvalid()) {
@@ -557,6 +561,80 @@ json Profiles() {
                        {"current", current && *current == uuid}});
     }
     return out;
+}
+
+/// The profile manager, for a frontend that has no screen of its own for it (Citron's Android)
+/// and for the setup, which makes and names profiles the way the desktop host does.
+json ProfileAction(const json& args) {
+    auto& manager = System().GetProfileManager();
+    const std::string action = args.value("action", std::string{});
+    const Common::UUID uuid{args.value("uuid", std::string{})};
+    const std::string name = args.value("name", std::string{});
+
+    if (action == "create") {
+        if (!manager.CanSystemRegisterUser()) {
+            return {{"error", "There is no room for another profile."}};
+        }
+        const Common::UUID created = Common::UUID::MakeRandom();
+        if (manager.CreateNewUser(created, name.empty() ? std::string{OPENPAK_EMULATOR_NAME} : name)
+                .IsError()) {
+            return {{"error", "The profile could not be created."}};
+        }
+        manager.WriteUserSaveFile();
+        return {{"error", ""}, {"uuid", created.FormattedString()}};
+    }
+    if (uuid.IsInvalid()) {
+        return {{"error", "No such profile."}};
+    }
+    if (action == "select") {
+        const auto index = manager.GetUserIndex(uuid);
+        if (!index) {
+            return {{"error", "No such profile."}};
+        }
+        Settings::values.current_user = static_cast<s32>(*index);
+        ProfileChanged();
+        return {{"error", ""}};
+    }
+    if (action == "rename") {
+        Service::Account::ProfileBase profile{};
+        if (name.empty() || !manager.GetProfileBase(uuid, profile)) {
+            return {{"error", "No such profile."}};
+        }
+        const std::string trimmed = name.substr(0, profile.username.size() - 1);
+        std::fill(profile.username.begin(), profile.username.end(), '\0');
+        std::copy(trimmed.begin(), trimmed.end(), profile.username.begin());
+        manager.SetProfileBase(uuid, profile);
+        manager.WriteUserSaveFile();
+        return {{"error", ""}};
+    }
+    if (action == "remove") {
+        if (manager.GetUserCount() < 2) {
+            return {{"error", "The last profile cannot be deleted."}};
+        }
+        ForgetProfile(uuid.FormattedString());
+        const auto index = manager.GetUserIndex(uuid);
+        if (index && Settings::values.current_user.GetValue() == static_cast<s32>(*index)) {
+            Settings::values.current_user = 0;
+        }
+        if (!manager.RemoveUser(uuid)) {
+            return {{"error", "The profile could not be deleted."}};
+        }
+        manager.WriteUserSaveFile();
+        ProfileChanged();
+        return {{"error", ""}};
+    }
+    if (action == "image") {
+        // A 256x256 JPEG Kotlin made, where the account service reads a profile's picture.
+        const auto target = OPENPAK_PATH(NANDDir) /
+                            fmt::format("system/save/8000000000000010/su/avators/{}.jpg",
+                                        uuid.FormattedString());
+        std::error_code ec;
+        std::filesystem::create_directories(target.parent_path(), ec);
+        std::filesystem::copy_file(args.value("path", std::string{}), target,
+                                   std::filesystem::copy_options::overwrite_existing, ec);
+        return {{"error", ec ? ec.message() : std::string{}}};
+    }
+    return {{"error", "Unknown action."}};
 }
 
 json Friends() {
@@ -826,6 +904,9 @@ json Call(const std::string& method, const json& args) {
     }
     if (method == "profiles") {
         return Profiles();
+    }
+    if (method == "profile_action") {
+        return ProfileAction(args);
     }
     if (method == "poll") {
         // Every call: the inbox the heartbeat keeps warm. Every fourth (the poll runs every five

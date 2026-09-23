@@ -1988,5 +1988,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
     <string name="openpak_services">Services</string>
     <string name="openpak_up">up</string>
     <string name="openpak_down">down</string>
+    <string name="openpak_use_profile">Use this profile</string>
+    <string name="openpak_rename_profile">Rename</string>
+    <string name="openpak_delete_profile">Delete profile</string>
+    <string name="openpak_delete_profile_confirm">Delete %1$s? Its OpenPak sign-in is revoked; its cloud saves stay on the account.</string>
     <string name="openpak_description">Account, friends, invitations, cloud saves, mods, news and status</string>
 </resources>
