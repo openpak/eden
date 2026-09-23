@@ -28,10 +28,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.yuzu.yuzu_emu.NativeLibrary
 import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.YuzuApplication
-import org.yuzu.yuzu_emu.model.ProfileUtils
 
 /**
  * The OpenPak moments that are not a screen of their own, as the desktop host has them: which
@@ -227,11 +225,8 @@ object OpenPakUi : Application.ActivityLifecycleCallbacks {
 
     /** Make a profile the current one; the session takes the old account offline and signs this in. */
     suspend fun selectProfile(uuid: String) {
-        withContext(Dispatchers.IO) {
-            NativeLibrary.setCurrentUser(uuid)
-            NativeConfig.saveGlobalConfig()
-        }
-        OpenPak.profileChanged()
+        OpenPak.profileAction("select", uuid)
+        withContext(Dispatchers.IO) { NativeConfig.saveGlobalConfig() }
     }
 
     /**
@@ -303,14 +298,14 @@ object OpenPakUi : Application.ActivityLifecycleCallbacks {
                     }
                     activity.lifecycleScope.launch {
                         if (addAccount) {
-                            val uuid = ProfileUtils.generateRandomUUID()
-                            if (withContext(Dispatchers.IO) { NativeLibrary.createUser(uuid, chosen) }) {
-                                selectProfile(uuid)
+                            val created = OpenPak.profileAction("create", name = chosen)
+                            if (created.optString("error").isEmpty()) {
+                                selectProfile(created.optString("uuid"))
+                            } else {
+                                toast(created.optString("error"))
                             }
                         } else {
-                            NativeLibrary.getCurrentUser()?.let {
-                                withContext(Dispatchers.IO) { NativeLibrary.updateUserUsername(it, chosen) }
-                            }
+                            OpenPak.currentProfile()?.let { OpenPak.profileAction("rename", it.uuid, chosen) }
                         }
                         done()
                     }
@@ -329,14 +324,17 @@ object OpenPakUi : Application.ActivityLifecycleCallbacks {
         done: () -> Unit
     ) {
         activity.lifecycleScope.launch {
-            val previous = NativeLibrary.getCurrentUser()
+            val previous = OpenPak.currentProfile()?.uuid
             var created: String? = null
             if (addAccount) {
-                val uuid = ProfileUtils.generateRandomUUID()
-                if (withContext(Dispatchers.IO) { NativeLibrary.createUser(uuid, "OpenPak") }) {
-                    created = uuid
-                    selectProfile(uuid)
+                val made = OpenPak.profileAction("create", name = "OpenPak")
+                if (made.optString("error").isNotEmpty()) {
+                    toast(made.optString("error"))
+                    done()
+                    return@launch
                 }
+                created = made.optString("uuid")
+                selectProfile(made.optString("uuid"))
             }
             showSignIn(activity, adopt = true, intro = intro) { signedIn ->
                 if (signedIn) {
@@ -346,7 +344,7 @@ object OpenPakUi : Application.ActivityLifecycleCallbacks {
                 activity.lifecycleScope.launch {
                     created?.let {
                         if (!previous.isNullOrEmpty()) selectProfile(previous)
-                        withContext(Dispatchers.IO) { NativeLibrary.removeUser(it) }
+                        OpenPak.profileAction("remove", it)
                     }
                     runSetup(activity, addAccount, done)
                 }
@@ -420,11 +418,11 @@ object OpenPakUi : Application.ActivityLifecycleCallbacks {
 
     /** The account's name and picture, copied into the current profile once. */
     private suspend fun adoptAccount(activity: Activity, username: String, avatar: String) {
-        val uuid = NativeLibrary.getCurrentUser() ?: return
+        val uuid = OpenPak.currentProfile()?.uuid ?: return
+        if (username.isNotEmpty()) {
+            OpenPak.profileAction("rename", uuid, username.take(32))
+        }
         withContext(Dispatchers.IO) {
-            if (username.isNotEmpty()) {
-                NativeLibrary.updateUserUsername(uuid, username.take(32))
-            }
             if (avatar.isEmpty()) return@withContext
             runCatching {
                 val bytes = Base64.decode(avatar, Base64.DEFAULT)
@@ -440,7 +438,9 @@ object OpenPakUi : Application.ActivityLifecycleCallbacks {
                 val scaled = Bitmap.createScaledBitmap(square, 256, 256, true)
                 val file = File(activity.cacheDir, "openpak-avatar.jpg")
                 file.outputStream().use { scaled.compress(Bitmap.CompressFormat.JPEG, 90, it) }
-                NativeLibrary.saveUserImage(uuid, file.absolutePath)
+                kotlinx.coroutines.runBlocking {
+                    OpenPak.profileAction("image", uuid, path = file.absolutePath)
+                }
                 file.delete()
             }
         }

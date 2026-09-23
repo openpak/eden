@@ -206,12 +206,29 @@ class OpenPakFragment : DialogFragment() {
                     getString(R.string.openpak_badge, profile.account)
                 }
             ) {
-                if (!profile.current && status.running.isEmpty()) {
-                    lifecycleScope.launch {
-                        OpenPakUi.selectProfile(profile.uuid)
-                        showSection(0)
+                // Not while a title runs: the game holds the profile it started with.
+                if (status.running.isNotEmpty()) {
+                    toast(getString(R.string.openpak_stop_game_first))
+                    return@addRow
+                }
+                val actions = mutableListOf<Pair<String, () -> Unit>>()
+                if (!profile.current) {
+                    actions += getString(R.string.openpak_use_profile) to {
+                        lifecycleScope.launch {
+                            OpenPakUi.selectProfile(profile.uuid)
+                            showSection(0)
+                        }
                     }
                 }
+                actions += getString(R.string.openpak_rename_profile) to { renameProfile(profile) }
+                if (profiles.size > 1) {
+                    actions += getString(R.string.openpak_delete_profile) to {
+                        confirm(getString(R.string.openpak_delete_profile_confirm, profile.name)) {
+                            profileAction("remove", profile.uuid)
+                        }
+                    }
+                }
+                chooseAction(profile.name, actions)
             }
         }
         addButtons(
@@ -229,6 +246,31 @@ class OpenPakFragment : DialogFragment() {
             OpenPak.cloudSyncEnabled = it
         }
         addText(getString(R.string.openpak_server_line, status.site, status.server), dim = true)
+    }
+
+    private fun renameProfile(profile: OpenPak.Profile) {
+        val name = EditText(requireActivity()).apply {
+            setText(profile.name)
+            inputType = InputType.TYPE_CLASS_TEXT
+        }
+        MaterialAlertDialogBuilder(requireActivity())
+            .setTitle(R.string.openpak_profile_name)
+            .setView(OpenPakUi.frame(requireActivity(), name))
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val chosen = name.text.toString().trim().take(32)
+                if (chosen.isNotEmpty()) profileAction("rename", profile.uuid, chosen)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun profileAction(action: String, uuid: String, name: String = "") {
+        lifecycleScope.launch {
+            val error = OpenPak.profileAction(action, uuid, name).optString("error")
+            if (error.isNotEmpty()) toast(error)
+            org.yuzu.yuzu_emu.utils.NativeConfig.saveGlobalConfig()
+            if (isAdded) showSection(0)
+        }
     }
 
     private fun chooseStartupProfile(profiles: List<OpenPak.Profile>) {
