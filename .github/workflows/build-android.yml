@@ -62,9 +62,8 @@ jobs:
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/openpak-v')
-        # The release may already exist -- a tag pushed by `gh release create` lands here too.
-        run: |
-          gh release create "${GITHUB_REF_NAME}" artifacts/* --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --generate-notes \
-            || gh release upload "${GITHUB_REF_NAME}" artifacts/* --repo "${GITHUB_REPOSITORY}" --clobber
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # The self-hosted job runs in a container without the gh CLI; the action needs nothing.
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
