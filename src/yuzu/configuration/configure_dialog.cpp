@@ -26,6 +26,7 @@
 #include "yuzu/configuration/configure_input.h"
 #include "yuzu/configuration/configure_input_player.h"
 #include "yuzu/configuration/configure_network.h"
+#include "yuzu/configuration/configure_openpak.h"
 #include "yuzu/configuration/configure_profile_manager.h"
 #include "yuzu/configuration/configure_system.h"
 #include "yuzu/configuration/configure_ui.h"
@@ -59,6 +60,7 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
       hotkeys_tab{std::make_unique<ConfigureHotkeys>(system_.HIDCore(), this)},
       input_tab{std::make_unique<ConfigureInput>(system_, this)},
       network_tab{std::make_unique<ConfigureNetwork>(system_, this)},
+      openpak_tab{std::make_unique<ConfigureOpenPak>(system_, this)},
       profile_tab{std::make_unique<ConfigureProfileManager>(system_, this)},
       system_tab{std::make_unique<ConfigureSystem>(system_, nullptr, *builder, this)},
       web_tab{std::make_unique<ConfigureWeb>(this)} {
@@ -79,6 +81,7 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
     ui->tabWidget->addTab(input_tab.get(), tr("Controls"));
     ui->tabWidget->addTab(profile_tab.get(), tr("Profiles"));
     ui->tabWidget->addTab(network_tab.get(), tr("Network"));
+    ui->tabWidget->addTab(openpak_tab.get(), tr("OpenPak"));
     ui->tabWidget->addTab(system_tab.get(), tr("System"));
     ui->tabWidget->addTab(ui_tab.get(), tr("Game List"));
     ui->tabWidget->addTab(web_tab.get(), tr("Web"));
@@ -137,6 +140,7 @@ void ConfigureDialog::ApplyConfiguration() {
     debug_tab_tab->ApplyConfiguration();
     web_tab->ApplyConfiguration();
     network_tab->ApplyConfiguration();
+    openpak_tab->ApplyConfiguration();
     applets_tab->ApplyConfiguration();
     system.ApplySettings();
     Settings::LogSettings();
@@ -175,8 +179,8 @@ void ConfigureDialog::PopulateSelectionList() {
         {{tr("General"),
           {general_tab.get(), hotkeys_tab.get(), ui_tab.get(), web_tab.get(), debug_tab_tab.get()}},
          {tr("System"),
-          {system_tab.get(), profile_tab.get(), network_tab.get(), filesystem_tab.get(),
-           applets_tab.get()}},
+          {system_tab.get(), profile_tab.get(), network_tab.get(), openpak_tab.get(),
+           filesystem_tab.get(), applets_tab.get()}},
          {tr("CPU"), {cpu_tab.get()}},
          {tr("Graphics"),
           {graphics_tab.get(), graphics_advanced_tab.get(), graphics_extensions_tab.get()}},
@@ -220,5 +224,17 @@ void ConfigureDialog::UpdateVisibleTabs() {
     for (auto* const tab : tabs) {
         LOG_DEBUG(Frontend, "{}", tab->accessibleName().toStdString());
         ui->tabWidget->addTab(tab, tab->accessibleName());
+    }
+}
+
+void ConfigureDialog::SelectOpenPak() {
+    // The OpenPak page sits after Network in the System group.
+    for (int row = 0; row < ui->selectorList->count(); ++row) {
+        const auto tabs = qvariant_cast<QList<QWidget*>>(ui->selectorList->item(row)->data(Qt::UserRole));
+        if (tabs.contains(openpak_tab.get())) {
+            ui->selectorList->setCurrentRow(row);
+            ui->tabWidget->setCurrentWidget(openpak_tab.get());
+            return;
+        }
     }
 }

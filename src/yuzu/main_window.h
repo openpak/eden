@@ -364,6 +364,8 @@ private slots:
     void OnMenuInstallToNAND();
     void OnMenuRecentFile();
     void OnConfigure();
+    // Configure, opened at its OpenPak page (the OpenPak menu's OpenPak settings...).
+    void OnConfigureOpenPak();
     void OnConfigureTas();
     void OnDecreaseVolume();
     void OnIncreaseVolume();
@@ -491,6 +493,7 @@ private:
     MultiplayerState* multiplayer_state = nullptr;
     OpenPakHost* openpak_host = nullptr;
     u64 openpak_title_id = 0; ///< The title whose save goes up when emulation stops.
+    bool configure_at_openpak = false; ///< The next Configure opens at its OpenPak page.
 
     GRenderWindow* render_window = nullptr;
     GameList* game_list = nullptr;

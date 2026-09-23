@@ -23,7 +23,8 @@
 #include "yuzu/openpak_host.h"
 #include "openpak/qt/friend_picker.h"
 #include "openpak/compatibility.h"
-#include "openpak/qt/toast.h"
+#include "openpak/qt/strings.h"
+#include <QStandardItemModel>
 #include <QPointer>
 #include <future>
 #include <thread>
@@ -32,6 +33,7 @@
 #include "openpak/platform.h"
 #include "openpak/session.h"
 #include "openpak/qt/account_dialog.h"
+#include "qt_common/game_list/game_list_p.h"
 #include "ui_main.h"
 
 // Other Yuzu stuff //
@@ -1053,40 +1055,25 @@ void MainWindow::InitializeWidgets() {
     openpak::qt::Host::SetCurrent(openpak_host);
     // MyPage's "invite friends": the library's picker, driven by mouse, keyboard or controller.
     openpak::qt::InstallFriendPicker(openpak_host, this);
-    // The OpenPak menu (UX spec §3.1), built by the host so Eden's and Citron's are the same.
-    openpak_host->PopulateMenu(
-        ui->menu_OpenPak,
-        [this](int page) {
-            OpenPakAccountDialog dialog(openpak_host, this, page);
-            dialog.exec();
-        },
-        [this] { OnConfigure(); });
-    connect(openpak_host, &openpak::qt::Host::StatusChanged, this,
-            [this](const QString& message) { statusBar()->showMessage(message, 5000); });
-
-    // OpenPak toasts, as Ryujinx shows them: a friend coming online or starting a game, a friend
-    // request, a game invitation. Friends already online at sign-in are not announced (the host's
-    // first poll is silent).
-    auto* openpak_toast = new NextendoToast(this);
-    const auto toast = [this, openpak_toast](const QString& headline, const QString& detail,
-                                             const QString& avatar, NextendoToast::Kind kind) {
-        if (openpak_host->NotificationsEnabled()) {
-            openpak_toast->Show(headline, detail, avatar, kind);
+    // The OpenPak menu (UX spec §3.1), built by the library the way every emulator has it;
+    // OpenPak settings... opens Configure at its OpenPak page. The host owns the window and the
+    // toasts (§3.10), so nothing OpenPak goes to the status bar.
+    openpak_host->PopulateMenu(ui->menu_OpenPak, [this] { OnConfigureOpenPak(); });
+    // Join on the Invitations page starts the game the invitation is for.
+    connect(openpak_host, &openpak::qt::Host::QuickStartRequested, this, [this](u64 title_id) {
+        const QStandardItemModel* model = game_list->GetModel();
+        for (int dir = 0; model && dir < model->rowCount(); ++dir) {
+            const QStandardItem* folder = model->item(dir);
+            for (int row = 0; row < folder->rowCount(); ++row) {
+                const QStandardItem* game = folder->child(row);
+                if (game->data(GameListItemPath::ProgramIdRole).toULongLong() == title_id) {
+                    BootGameFromList(game->data(GameListItemPath::FullPathRole).toString(),
+                                     StartGameType::Normal);
+                    return;
+                }
+            }
         }
-    };
-    connect(openpak_host, &openpak::qt::Host::FriendCameOnline, this,
-            [toast](u64, const QString& name, const QString& game, const QString& avatar) {
-                toast(name, game.isEmpty() ? tr("is online") : tr("is playing %1").arg(game), avatar,
-                      NextendoToast::Kind::Online);
-            });
-    connect(openpak_host, &openpak::qt::Host::FriendRequestReceived, this,
-            [toast](u64, const QString& name, const QString& avatar) {
-                toast(name, tr("sent you a friend request"), avatar, NextendoToast::Kind::Request);
-            });
-    connect(openpak_host, &openpak::qt::Host::FriendInvitationReceived, this,
-            [toast](u64, const QString& name) {
-                toast(name, tr("invited you to play"), {}, NextendoToast::Kind::GameInvite);
-            });
+    });
 
     // What the site says right now about each title's online play, over the list this build
     // shipped with; the game list is drawn again only when that changes something.
@@ -1428,6 +1415,17 @@ void MainWindow::InitializeHotkeys() {
     LinkActionShortcut(ui->action_Leave_Room, QStringLiteral("Leave Room"));
     LinkActionShortcut(ui->action_Configure, QStringLiteral("Configure"));
     LinkActionShortcut(ui->action_Configure_Current_Game, QStringLiteral("Configure Current Game"));
+    // Open OpenPak (UX spec §3.1): the window at its last page, or closed when it is open. No
+    // keyboard default; Home+X on a controller.
+    {
+        auto* open_openpak = new QAction(this);
+        connect(open_openpak, &QAction::triggered, this, [this] {
+            if (openpak_host) {
+                openpak_host->ToggleWindow();
+            }
+        });
+        LinkActionShortcut(open_openpak, QStringLiteral("Open OpenPak"));
+    }
 
     static const QString main_window = QStringLiteral("Main Window");
     const auto connect_shortcut = [&]<typename Fn>(const QString& action_name, const Fn& function) {
@@ -3525,6 +3523,12 @@ void MainWindow::ToggleShowGameName() {
     game_list->RefreshGameDirectory();
 }
 
+void MainWindow::OnConfigureOpenPak() {
+    configure_at_openpak = true;
+    OnConfigure();
+    configure_at_openpak = false;
+}
+
 void MainWindow::OnConfigure() {
     const auto old_theme = UISettings::values.theme;
     const bool old_discord_presence = UISettings::values.enable_discord_presence.GetValue();
@@ -3542,6 +3546,9 @@ void MainWindow::OnConfigure() {
             &MainWindow::OnLanguageChanged);
     connect(&configure_dialog, &ConfigureDialog::ExternalContentDirsChanged, this,
             &MainWindow::OnGameListRefresh);
+    if (configure_at_openpak) {
+        configure_dialog.SelectOpenPak();
+    }
 
     const auto result = configure_dialog.exec();
 
@@ -4829,6 +4836,9 @@ void MainWindow::LoadTranslation() {
         qApp->installTranslator(&translator);
     else
         UISettings::values.language = std::string("en");
+
+    // OpenPak's words come from the library's own table (UX spec §7), in the same language.
+    openpak::qt::LoadTranslations(QString::fromStdString(UISettings::values.language.GetValue()));
 }
 
 void MainWindow::OnLanguageChanged(const QString& locale) {
