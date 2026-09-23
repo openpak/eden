@@ -960,6 +960,7 @@ void OpenPakHost::PollInvitations() {
         if (running.empty() || Common::ToLower(running) != Common::ToLower(invitation.title_id)) {
             if (announced_invitations.insert(invitation.id).second) {
                 emit StatusChanged(tr("%1 invited you to play %2. Start it to join.").arg(sender, game));
+                emit FriendInvitationReceived(0, sender);
             }
             continue;
         }
