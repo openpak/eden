@@ -5,7 +5,9 @@
 #include <filesystem>
 #include "openpak/qt/host.h"
 
+#include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <QJsonObject>
@@ -24,6 +26,7 @@ struct UUID;
 }
 
 class NextendoChatClient;
+class QMenu;
 
 // Sign-in/out, friend-cache refresh, and the online-toast poll. One instance, owned by GMainWindow.
 class OpenPakHost : public openpak::qt::Host {
@@ -48,8 +51,14 @@ public:
     std::string GetLocalAppId() const override;
 
     void SignIn() override;
-    // The one-time "Sign in to OpenPak?" at first launch. Does nothing once it has been asked.
-    void OfferSignInOnce();
+    // At launch: which profile (the startup setting, or the picker), then -- once ever -- set that
+    // profile up, then online. Not interactive (a game path, -u) asks nothing and only goes online.
+    void RunStartup(bool interactive);
+    // Each profile is its own OpenPak account. Call after anything that may have changed the
+    // current user; the host drops what it showed for the last one and brings up the new one.
+    void ProfileMaybeChanged();
+    // The "account at startup" choice: last used, ask, or one profile.
+    QMenu* CreateStartupMenu(QWidget* parent);
     void SignOut() override;
     void RefreshFriendCache() override;
     void NotifyFriendRequestSent(const QString& friend_code) override;
@@ -93,7 +102,16 @@ public:
     openpak::qt::Navigation* CreateNavigation(QObject* parent) override;
 
 private:
-    void AskAndSignIn(bool first_run, const QString& error, const QString& last_email);
+    // adopt copies the account's name and avatar into the profile, which only the setup does:
+    // after that the profile is the person's own to rename. done hears whether it worked.
+    void AskAndSignIn(bool adopt, const QString& intro, const QString& error,
+                      const QString& last_email, std::function<void(bool)> done = {});
+    void GoOnline();
+    void RunSetup(bool add_account);
+    void PickStartupProfile();
+    std::optional<Common::UUID> CurrentUser() const;
+    QString ProfileName(const std::string& key) const;
+    void SelectUser(const Common::UUID& uuid);
     void ApplyProfileName(const std::string& name);
     // Forces the active Switch profile's picture to match the linked Nextendo account's
     // avatar, mirroring ApplyProfileName's username sync. Fetches async since it needs a
@@ -111,6 +129,7 @@ private:
     std::map<u64, int> offline_streak; // consecutive polls seen offline, not yet confirmed
     std::set<u64> last_known_requests;
     bool first_poll = true; // suppresses a toast burst for every friend already online at boot
+    std::string active_profile; // the profile everything shown here belongs to
 
     NextendoChatClient* chat_client = nullptr;
     QString pending_chat_room_id; // set by whichever create/join is in flight, used to tag ChatMemberJoined
