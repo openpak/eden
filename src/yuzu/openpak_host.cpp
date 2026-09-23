@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <chrono>
 #include <thread>
 #include <utility>
 
@@ -35,6 +36,7 @@
 #include "openpak/account.h"
 #include "openpak/friends_cache.h"
 #include "core/core.h"
+#include "core/hle/service/am/applet_manager.h"
 #include "common/fs/path_util.h"
 #include "common/settings.h"
 #include "qt_common/config/uisettings.h"
@@ -779,15 +781,18 @@ QString OpenPakHost::JoinFriendSession(u64 pid) {
         return message;
     }
 
-    // Bypasses the native Invite Friends applet entirely: we already have this friend's
-    // published session blob locally (from the same presence feed the friends list itself
-    // renders), so there's no need to round-trip through SendFriendInvitation/the account
-    // server's mailbox at all -- just hand it straight to the same local queue
-    // TryPopFromFriendInvitationStorageChannel already reads from.
-    Common::NextendoFriends::SetPendingInvitations({Common::NextendoFriends::PendingInvitation{
-        it->pid, it->name, std::vector<u8>(it->app_field.begin(), it->app_field.end())}});
+    // Bypasses the native Invite Friends applet entirely: this friend's published session blob
+    // is already here (the same presence feed the list renders), so it goes straight into the
+    // running game's invitation channel, as an accepted invitation would.
+    const auto user = CurrentUser();
+    if (!user || !system.GetAppletManager().PushFriendInvitation(
+                     *user, std::vector<u8>(it->app_field.begin(), it->app_field.end()))) {
+        const QString message = tr("Start the game first, then join from here.");
+        emit StatusChanged(message);
+        return message;
+    }
 
-    const QString message = tr("Ready to join %1's game -- start or resume the title now.")
+    const QString message = tr("Joining %1's game.")
                                 .arg(QString::fromStdString(it->name));
     emit StatusChanged(message);
     return message;
@@ -883,42 +888,45 @@ void OpenPakHost::PollFriends() {
 }
 
 void OpenPakHost::PollInvitations() {
-#ifdef ENABLE_WEB_SERVICE
-    if (!Common::OpenPakAccount::IsLinked()) {
-        LOG_INFO(Frontend, "[OpenPak] PollInvitations: skipped, not linked");
-        return;
-    }
-    LOG_INFO(Frontend, "[OpenPak] PollInvitations: tick");
+    // What the heartbeat last read from the native inbox, offered as Ryujinx offers it: an
+    // invitation to the running game asks Join or Ignore, and Join leaves the sender's data in the
+    // game's invitation channel, where the game looks for it. One to another game is announced
+    // once and offered when that game is running. Either answer marks it read.
+    const std::string running = GetLocalAppId();
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
 
-    QPointer<OpenPakHost> self(this);
-    std::thread{[this, self] {
-        auto fetched = WebService::OpenPakApi::PollInvitations();
-        if (fetched.empty() || !self) {
-            return;
+    for (const auto& invitation : openpak::client::session::Invitations()) {
+        if (offered_invitations.contains(invitation.id) ||
+            (invitation.expires_at != 0 && invitation.expires_at < now)) {
+            continue;
         }
 
-        QMetaObject::invokeMethod(
-            this,
-            [self, list = std::move(fetched)] {
-                if (!self) {
-                    return;
-                }
-                std::vector<Common::NextendoFriends::PendingInvitation> cache;
-                cache.reserve(list.size());
-                for (const auto& inv : list) {
-                    cache.push_back({inv.from_pid, inv.from_name, inv.app_param});
-                }
-                Common::NextendoFriends::SetPendingInvitations(std::move(cache));
-                for (const auto& inv : list) {
-                    emit self->FriendInvitationReceived(inv.from_pid,
-                                                        QString::fromStdString(inv.from_name));
-                }
-            },
-            Qt::QueuedConnection);
-    }}.detach();
-#endif
-}
+        const QString sender = QString::fromStdString(invitation.sender_name);
+        const QString game = ResolveGameName(invitation.title_id);
+        if (running.empty() || Common::ToLower(running) != Common::ToLower(invitation.title_id)) {
+            if (announced_invitations.insert(invitation.id).second) {
+                emit StatusChanged(tr("%1 invited you to play %2. Start it to join.").arg(sender, game));
+            }
+            continue;
+        }
 
+        offered_invitations.insert(invitation.id);
+        const auto answer = QMessageBox::question(
+            main_window, tr("Game invitation"), tr("%1 invited you to join them in %2.").arg(sender, game),
+            QMessageBox::Yes | QMessageBox::Ignore, QMessageBox::Yes);
+
+        if (answer == QMessageBox::Yes) {
+            const auto user = CurrentUser();
+            if (!user || !system.GetAppletManager().PushFriendInvitation(*user, invitation.app_param)) {
+                emit StatusChanged(tr("The game closed before the invitation could be handed over."));
+            }
+        }
+
+        std::thread{[id = invitation.id] { openpak::client::session::DismissInvitation(id); }}.detach();
+    }
+}
 
 // ---- openpak::qt::Host: Eden-specific answers ----
 
