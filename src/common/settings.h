@@ -933,6 +933,10 @@ struct Values {
     // runs its second responder on.
     Setting<std::string> openpak_nat_ip{linkage, "145.241.228.207", "openpak_nat_ip",
                                         Category::Network};
+    // Governs the automatic pull before a launch and push after it (UX spec §3.13, default on);
+    // the Cloud saves page's buttons are an explicit choice each time.
+    Setting<bool> openpak_cloud_sync_enabled{linkage, true, "openpak_cloud_sync_enabled",
+                                             Category::Network};
 
     // WebService
     Setting<std::string> web_api_url{linkage, "api.ynet-fun.xyz", "web_api_url",
