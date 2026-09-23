@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # The desktop Linux build of a release: an x86_64 AppImage (and the same tree as a tar.zst),
-# attached to the vX.Y.Z release that the Android workflow publishes for the same tag.
+# attached to the vX.Y.Z release that release.yml creates for the same tag.
 # It is built the way Citron's Linux nightly is: the pkgforge Arch container on the self-hosted
 # runner, installed to /usr, then bundled with quick-sharun and uruntime2appimage.
 # Nothing passes through artifacts: the organisation's artifact quota filled up and stopped
@@ -63,7 +63,10 @@ jobs:
     needs: [resolve]
     runs-on: [self-hosted, linux, podman]
     timeout-minutes: 180
-    container: ghcr.io/pkgforge-dev/archlinux:latest
+    # The runner is the owner's workstation: at most 8 CPUs for the build (2026-09-23).
+    container:
+      image: ghcr.io/pkgforge-dev/archlinux:latest
+      options: --cpus 8
     env:
       TAG: ${{ needs.resolve.outputs.tag }}
     steps:
@@ -102,7 +105,7 @@ jobs:
             -DYUZU_ROOM_STANDALONE=OFF
 
       - name: Build
-        run: cmake --build build --parallel "$(nproc)"
+        run: nice -n 10 cmake --build build --parallel 8
 
       - name: Install to /usr
         run: cmake --install build
@@ -132,14 +135,11 @@ jobs:
           ls -l dist
 
       - name: Attach to the release
-        # The build container has no gh; the action needs nothing.
-        uses: softprops/action-gh-release@v2
+        # The build container has no gh; github-script needs nothing.
+        uses: actions/github-script@v7
         with:
-          tag_name: ${{ env.TAG }}
-          files: |
-            dist/*.AppImage
-            dist/*.AppImage.zsync
-            dist/*.tar.zst
+          script: |
+            await require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/attach-to-release.js`)({ github, context, glob, core }, 'dist/*.AppImage\ndist/*.AppImage.zsync\ndist/*.tar.zst', process.env.TAG);
 
       # The container runs as root on the self-hosted runner, and root-owned files left in the
       # workspace stop the next job's checkout, which runs as the runner's user.

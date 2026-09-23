@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-NUM_JOBS=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)
+NUM_JOBS=${NUM_JOBS:-$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}
 export CMAKE_BUILD_PARALLEL_LEVEL="${NUM_JOBS}"
 ARTIFACTS_DIR="$PWD/artifacts"
 
