@@ -1147,8 +1147,6 @@ add_library(core STATIC
     loader/nso.h
     loader/nsp.cpp
     loader/nsp.h
-    loader/openpak_code_patches.cpp
-    loader/openpak_code_patches.h
     loader/xci.cpp
     loader/xci.h
     memory.cpp

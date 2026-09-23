@@ -18,7 +18,6 @@ add_executable(tests
     common/unique_function.cpp
     core/core_timing.cpp
     core/internal_network/network.cpp
-    core/loader/openpak_code_patches.cpp
     core/sockets/openpak_redirect.cpp
     video_core/memory_tracker.cpp
     input_common/calibration_configuration_job.cpp
