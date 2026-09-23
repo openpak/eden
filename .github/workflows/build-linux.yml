@@ -1,0 +1,148 @@
+# SPDX-FileCopyrightText: Copyright 2026 OpenPak
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# The desktop Linux build of a release: an x86_64 AppImage (and the same tree as a tar.zst),
+# attached to the openpak-v* release that the Android workflow publishes for the same tag.
+# It is built the way Citron's Linux nightly is: the pkgforge Arch container on the self-hosted
+# runner, installed to /usr, then bundled with quick-sharun and uruntime2appimage.
+# Nothing passes through artifacts: the organisation's artifact quota filled up and stopped
+# releases (2026-09-23), so the build attaches its files to the release itself.
+name: Build Eden (Linux)
+
+on:
+  push:
+    tags: ['openpak-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build and attach to (empty: the latest openpak-v* release)'
+        required: false
+        default: ''
+
+concurrency:
+  group: eden-linux-${{ inputs.tag || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    name: Resolve the release tag
+    runs-on: [self-hosted, linux, podman]
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            tag=$INPUT_TAG
+          elif [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag=$GITHUB_REF_NAME
+          else
+            tag=$(gh release list --repo "$REPO" --limit 100 --exclude-drafts --json tagName,createdAt \
+              -q '[.[] | select(.tagName | startswith("openpak-v"))] | sort_by(.createdAt) | last | .tagName // ""')
+          fi
+          if [ -z "$tag" ]; then
+            echo "::error::No openpak-v* release found; pass the tag input."
+            exit 1
+          fi
+          if ! gh api "repos/$REPO/git/ref/tags/$tag" >/dev/null; then
+            echo "::error::Tag $tag does not exist in $REPO."
+            exit 1
+          fi
+          echo "Building and attaching to $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  appimage:
+    name: x86_64 AppImage
+    needs: [resolve]
+    runs-on: [self-hosted, linux, podman]
+    timeout-minutes: 180
+    container: ghcr.io/pkgforge-dev/archlinux:latest
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      # Eden's Arch dependency list (docs/Deps.md), plus what the AppImage tooling deploys from
+      # the system: Mesa and Vulkan drivers, the Wayland/X11 Qt platform bits, PipeWire/Pulse.
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel boost catch2 cmake enet ffmpeg fmt git glslang libzip lz4 ninja \
+            nlohmann-json openssl opus qt6-base qt6-multimedia qt6-charts qt6-wayland qt6-svg \
+            sdl3 zlib zstd zip unzip vulkan-headers vulkan-utility-libraries libusb \
+            spirv-tools spirv-headers \
+            libdecor libxkbcommon-x11 xcb-util-cursor xcb-util-image xcb-util-renderutil \
+            xcb-util-wm mesa vulkan-mesa-layers pipewire pulseaudio pulseaudio-alsa \
+            patchelf wget xorg-server-xvfb zsync
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+          # openpak-client is a submodule; without it CMake has no OpenPak to build.
+          submodules: true
+
+      - name: Add Git Safe Directory
+        run: git config --global --add safe.directory "$PWD"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DENABLE_QT=ON \
+            -DYUZU_USE_BUNDLED_QT=OFF \
+            -DYUZU_TESTS=OFF \
+            -DENABLE_WERROR=OFF \
+            -DYUZU_ROOM_STANDALONE=OFF
+
+      - name: Build
+        run: cmake --build build --parallel "$(nproc)"
+
+      - name: Install to /usr
+        run: cmake --install build
+
+      - name: Package AppImage and tarball
+        run: |
+          set -eux
+          SHARUN=https://raw.githubusercontent.com/pkgforge-dev/Anylinux-AppImages/refs/heads/main/useful-tools/quick-sharun.sh
+          URUNTIME=https://raw.githubusercontent.com/pkgforge-dev/Anylinux-AppImages/refs/heads/main/useful-tools/uruntime2appimage.sh
+          wget --retry-connrefused --tries=30 "$SHARUN" -O ./quick-sharun
+          wget --retry-connrefused --tries=30 "$URUNTIME" -O ./uruntime2appimage
+          chmod +x ./quick-sharun ./uruntime2appimage
+
+          export DESKTOP=/usr/share/applications/dev.eden_emu.eden.desktop
+          export ICON=/usr/share/icons/hicolor/scalable/apps/dev.eden_emu.eden.svg
+          export DEPLOY_OPENGL=1 DEPLOY_VULKAN=1 DEPLOY_PIPEWIRE=1
+          ./quick-sharun /usr/bin/eden*
+          echo 'SHARUN_ALLOW_SYS_VK_ICD=1' > ./AppDir/.env
+
+          name="eden-openpak-${TAG#openpak-}-linux-x86_64"
+          mkdir -p dist
+          (cd AppDir && tar -c --zstd -f "../dist/${name}.tar.zst" .)
+
+          export VERSION="$TAG" OUTPATH="$PWD/dist" OUTNAME="${name}.AppImage"
+          export UPINFO="gh-releases-zsync|${GITHUB_REPOSITORY%/*}|${GITHUB_REPOSITORY#*/}|latest|eden-openpak-*-linux-x86_64.AppImage.zsync"
+          ./uruntime2appimage
+          ls -l dist
+
+      - name: Attach to the release
+        # The build container has no gh; the action needs nothing.
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          files: |
+            dist/*.AppImage
+            dist/*.AppImage.zsync
+            dist/*.tar.zst
+
+      # The container runs as root on the self-hosted runner, and root-owned files left in the
+      # workspace stop the next job's checkout, which runs as the runner's user.
+      - name: Hand the workspace back to the runner
+        if: always()
+        run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE"
