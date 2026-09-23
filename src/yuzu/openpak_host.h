@@ -60,6 +60,10 @@ public:
     // The "account at startup" choice: last used, ask, or one profile.
     QMenu* CreateStartupMenu(QWidget* parent);
     void SignOut() override;
+    // Cloud saves as Ryujinx does them: the newest cloud copy before the title boots (blocking,
+    // a few seconds at most), the local copy up once it has stopped.
+    void PullSaveBeforeLaunch(u64 title_id);
+    void PushSaveAfterExit(u64 title_id);
     void RefreshFriendCache() override;
     void NotifyFriendRequestSent(const QString& friend_code) override;
 

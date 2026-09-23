@@ -17,6 +17,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSysInfo>
 #include <QVBoxLayout>
 #include <QDir>
 #include <QFileInfo>
@@ -74,6 +75,12 @@ OpenPakHost::OpenPakHost(Core::System& system_, QWidget* main_window_,
     invitation_poll_timer.start();
 
     active_profile = openpak::Platform::ProfileId();
+
+#ifdef ENABLE_WEB_SERVICE
+    // Which machine a cloud save version came from, as the Cloud saves page lists it.
+    WebService::OpenPakApi::SetSaveDevice(
+        QStringLiteral("Eden on %1").arg(QSysInfo::machineHostName()).toStdString());
+#endif
 }
 
 OpenPakHost::~OpenPakHost() = default;
@@ -676,6 +683,51 @@ void OpenPakHost::ManualSaveDownload(u64 title_id) {
 #else
     emit StatusChanged(tr("This build has no web services support."));
 #endif
+}
+
+void OpenPakHost::PullSaveBeforeLaunch(u64 title_id) {
+    if (title_id == 0 || !CloudSyncEnabled() || !IsLinked()) {
+        return;
+    }
+    const QString game = ResolveGameName(fmt::format("{:016X}", title_id));
+    switch (Nextendo::SaveSync::PullBeforeLaunch(SaveDirectory(title_id), title_id)) {
+    case Nextendo::SaveSync::PullOutcome::Pulled:
+        emit StatusChanged(tr("Your cloud save for %1 is here.").arg(game));
+        break;
+    case Nextendo::SaveSync::PullOutcome::BothExist:
+        emit StatusChanged(tr("%1 has a save here and one in the cloud; nothing was changed. "
+                              "Choose one on the Cloud saves page.")
+                               .arg(game));
+        break;
+    case Nextendo::SaveSync::PullOutcome::Nothing:
+        break;
+    }
+}
+
+void OpenPakHost::PushSaveAfterExit(u64 title_id) {
+    if (title_id == 0 || !CloudSyncEnabled() || !IsLinked()) {
+        return;
+    }
+    const auto directory = SaveDirectory(title_id);
+    auto zip = Nextendo::SaveSync::CaptureOnExit(directory, title_id);
+    if (zip.empty()) {
+        return;
+    }
+    QPointer<OpenPakHost> self(this);
+    const QString game = ResolveGameName(fmt::format("{:016X}", title_id));
+    std::thread{[this, self, directory, title_id, game, zip = std::move(zip)]() mutable {
+        const std::string error = Nextendo::SaveSync::PushCaptured(directory, title_id, std::move(zip));
+        QMetaObject::invokeMethod(
+            this,
+            [this, self, error, game] {
+                if (self) {
+                    emit StatusChanged(error.empty()
+                                           ? tr("%1 saved to the cloud.").arg(game)
+                                           : QString::fromStdString(error));
+                }
+            },
+            Qt::QueuedConnection);
+    }}.detach();
 }
 
 void OpenPakHost::QuickStart(u64 title_id) {

@@ -490,6 +490,7 @@ private:
 
     MultiplayerState* multiplayer_state = nullptr;
     OpenPakHost* openpak_host = nullptr;
+    u64 openpak_title_id = 0; ///< The title whose save goes up when emulation stops.
 
     GRenderWindow* render_window = nullptr;
     GameList* game_list = nullptr;
