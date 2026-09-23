@@ -12,6 +12,7 @@
 #include "core/hle/service/acc/errors.h"
 #include "core/hle/service/friend/friend.h"
 #include "core/hle/service/friend/friend_interface.h"
+#include "core/hle/service/friend/openpak_friends.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/server_manager.h"
@@ -476,7 +477,9 @@ private:
 void Module::Interface::CreateFriendService(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 2, 0, 1};
     rb.Push(ResultSuccess);
-    rb.PushIpcInterface<IFriendService>(ctx, system);
+    // [OpenPak] The friends module on OpenPak's friend graph. Any user it does not speak for gets
+    // the answers the stubs above always gave.
+    rb.PushIpcInterface(ctx, OpenPak::CreateFriendService(system, GetServiceName()));
     LOG_DEBUG(Service_Friend, "called");
 }
 
@@ -486,9 +489,16 @@ void Module::Interface::CreateNotificationService(HLERequestContext& ctx) {
 
     LOG_DEBUG(Service_Friend, "called, uuid=0x{}", uuid.RawString());
 
+    // [OpenPak] A queue is per user, and the module refuses one for nobody.
+    if (uuid.IsInvalid()) {
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(OpenPak::ResultInvalidArgument);
+        return;
+    }
+
     IPC::ResponseBuilder rb{ctx, 2, 0, 1};
     rb.Push(ResultSuccess);
-    rb.PushIpcInterface<INotificationService>(ctx, system, uuid);
+    rb.PushIpcInterface(ctx, OpenPak::CreateNotificationService(system, GetServiceName(), uuid));
 }
 
 Module::Interface::Interface(std::shared_ptr<Module> module_, Core::System& system_, const char* name)
