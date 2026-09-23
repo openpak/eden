@@ -1001,6 +1001,15 @@ void IGeneralService::SetExclusiveClient(HLERequestContext& ctx) {
     rb.Push(ResultSuccess);
 }
 
+void IGeneralService::AcceptSetting(HLERequestContext& ctx) {
+    // [OpenPak] System and test settings for the network (28-30): the host owns the network, so
+    // they are accepted and forgotten, as Ryujinx does, rather than failing the caller.
+    LOG_DEBUG(Service_NIFM, "called");
+
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(ResultSuccess);
+}
+
 void IGeneralService::IsAnyForegroundRequestAccepted(HLERequestContext& ctx) {
     // [OpenPak] A title asks whether its foreground network request was accepted before it
     // commits to going online, and answering "no" -- which is what an always-false stub says --
@@ -1097,9 +1106,9 @@ IGeneralService::IGeneralService(Core::System& system_)
         {25, &IGeneralService::GetSsidListVersion, "GetSsidListVersion"},
         {26, &IGeneralService::SetExclusiveClient, "SetExclusiveClient"},
         {27, nullptr, "GetDefaultIpSetting"},
-        {28, nullptr, "SetDefaultIpSetting"},
-        {29, nullptr, "SetWirelessCommunicationEnabledForTest"},
-        {30, nullptr, "SetEthernetCommunicationEnabledForTest"},
+        {28, &IGeneralService::AcceptSetting, "SetDefaultIpSetting"},
+        {29, &IGeneralService::AcceptSetting, "SetWirelessCommunicationEnabledForTest"},
+        {30, &IGeneralService::AcceptSetting, "SetEthernetCommunicationEnabledForTest"},
         {31, nullptr, "GetTelemetorySystemEventReadableHandle"},
         {32, nullptr, "GetTelemetryInfo"},
         {33, &IGeneralService::ConfirmSystemAvailability, "ConfirmSystemAvailability"}, // 2.0.0+
