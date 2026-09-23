@@ -159,6 +159,19 @@ struct Values {
     // Discord RPC
     Setting<bool> enable_discord_presence{linkage, false, "enable_discord_presence", Category::Ui};
 
+    // OpenPak (emulators/prds/openpak-ux-spec.md §3.13), under the same keys as Citron's.
+    Setting<bool> openpak_notifications_enabled{linkage, true, "openpak/notificationsEnabled",
+                                                Category::Ui};
+    // A NextendoToast::Corner: 0 top right, 1 top left, 2 bottom right (the spec's default), 3
+    // bottom left.
+    Setting<s32> openpak_notification_corner{linkage, 2, "openpak/notificationCorner", Category::Ui};
+    // Which profile goes online at startup: empty for the last used, "ask" for the picker, or one
+    // profile's UUID.
+    Setting<std::string> openpak_startup_profile{linkage, "", "openpak/startupProfile", Category::Ui};
+    // The one-time setup (sign in, create an account, or play offline) has been offered, and is
+    // never offered again on this install.
+    Setting<bool> openpak_setup_offered{linkage, false, "openpak/setupOffered", Category::Ui};
+
     // logging
     Setting<bool> show_console{linkage, false, "showConsole", Category::Ui};
 
