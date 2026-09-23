@@ -1035,30 +1035,16 @@ void MainWindow::InitializeWidgets() {
     openpak::qt::Host::SetCurrent(openpak_host);
     // MyPage's "invite friends": the library's picker, driven by mouse, keyboard or controller.
     openpak::qt::InstallFriendPicker(openpak_host, this);
-    // The OpenPak menu: the same items, in the same order, as Citron's.
-    connect(ui->action_OpenPak_Account, &QAction::triggered, this, [this] {
-        if (!openpak_host->IsLinked()) {
-            openpak_host->SignIn();
-            return;
-        }
-        OpenPakAccountDialog dialog(openpak_host, this);
-        dialog.exec();
-    });
-    connect(ui->action_OpenPak_Sign_In, &QAction::triggered, this, [this] { openpak_host->SignIn(); });
-    connect(ui->action_OpenPak_Sign_Out, &QAction::triggered, this, [this] { openpak_host->SignOut(); });
-    ui->action_OpenPak_Enable_Redirection->setChecked(Settings::values.enable_openpak.GetValue());
-    connect(ui->action_OpenPak_Enable_Redirection, &QAction::toggled, this,
-            [](bool on) { Settings::values.enable_openpak.SetValue(on); });
+    // The OpenPak menu (UX spec §3.1), built by the host so Eden's and Citron's are the same.
+    openpak_host->PopulateMenu(
+        ui->menu_OpenPak,
+        [this](int page) {
+            OpenPakAccountDialog dialog(openpak_host, this, page);
+            dialog.exec();
+        },
+        [this] { OnConfigure(); });
     connect(openpak_host, &openpak::qt::Host::StatusChanged, this,
             [this](const QString& message) { statusBar()->showMessage(message, 5000); });
-    connect(openpak_host, &openpak::qt::Host::AccountLinked, this,
-            [this] { ui->action_OpenPak_Sign_In->setEnabled(false); ui->action_OpenPak_Sign_Out->setEnabled(true); });
-    connect(openpak_host, &openpak::qt::Host::AccountUnlinked, this,
-            [this] { ui->action_OpenPak_Sign_In->setEnabled(true); ui->action_OpenPak_Sign_Out->setEnabled(false); });
-    ui->action_OpenPak_Sign_In->setEnabled(!openpak_host->IsLinked());
-    ui->action_OpenPak_Sign_Out->setEnabled(openpak_host->IsLinked());
-    ui->menu_OpenPak->insertMenu(ui->action_OpenPak_Enable_Redirection,
-                               openpak_host->CreateStartupMenu(this));
 
     // OpenPak toasts, as Ryujinx shows them: a friend coming online or starting a game, a friend
     // request, a game invitation. Friends already online at sign-in are not announced (the host's

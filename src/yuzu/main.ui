@@ -173,11 +173,6 @@
     <property name="title">
      <string>&amp;OpenPak</string>
     </property>
-    <addaction name="action_OpenPak_Account"/>
-    <addaction name="action_OpenPak_Sign_In"/>
-    <addaction name="action_OpenPak_Sign_Out"/>
-    <addaction name="separator"/>
-    <addaction name="action_OpenPak_Enable_Redirection"/>
    </widget>
    <widget class="QMenu" name="menu_Tools">
     <property name="title">
@@ -312,29 +307,6 @@
    </property>
    <property name="text">
     <string>Single &amp;Window Mode</string>
-   </property>
-  </action>
-  <action name="action_OpenPak_Account">
-   <property name="text">
-    <string>&amp;Open Account Page</string>
-   </property>
-  </action>
-  <action name="action_OpenPak_Sign_In">
-   <property name="text">
-    <string>&amp;Sign In</string>
-   </property>
-  </action>
-  <action name="action_OpenPak_Sign_Out">
-   <property name="text">
-    <string>Sign &amp;Out</string>
-   </property>
-  </action>
-  <action name="action_OpenPak_Enable_Redirection">
-   <property name="checkable">
-    <bool>true</bool>
-   </property>
-   <property name="text">
-    <string>&amp;Enable Network Redirection</string>
    </property>
   </action>
   <action name="action_Configure">
