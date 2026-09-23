@@ -1415,6 +1415,17 @@ void MainWindow::InitializeHotkeys() {
     LinkActionShortcut(ui->action_Leave_Room, QStringLiteral("Leave Room"));
     LinkActionShortcut(ui->action_Configure, QStringLiteral("Configure"));
     LinkActionShortcut(ui->action_Configure_Current_Game, QStringLiteral("Configure Current Game"));
+    // Open OpenPak (UX spec §3.1): the window at its last page, or closed when it is open. No
+    // keyboard default; Home+X on a controller.
+    {
+        auto* open_openpak = new QAction(this);
+        connect(open_openpak, &QAction::triggered, this, [this] {
+            if (openpak_host) {
+                openpak_host->ToggleWindow();
+            }
+        });
+        LinkActionShortcut(open_openpak, QStringLiteral("Open OpenPak"));
+    }
 
     static const QString main_window = QStringLiteral("Main Window");
     const auto connect_shortcut = [&]<typename Fn>(const QString& action_name, const Fn& function) {
