@@ -32,6 +32,7 @@ class ConfigureInput;
 class ConfigureProfileManager;
 class ConfigureSystem;
 class ConfigureNetwork;
+class ConfigureOpenPak;
 class ConfigureUi;
 class ConfigureWeb;
 
@@ -56,6 +57,9 @@ public:
     ~ConfigureDialog() override;
 
     void ApplyConfiguration();
+
+    // Shows the OpenPak page, as the OpenPak menu's OpenPak settings... asks.
+    void SelectOpenPak();
 
 private slots:
     void OnLanguageChanged(const QString& locale);
@@ -94,6 +98,7 @@ private:
     std::unique_ptr<ConfigureHotkeys> hotkeys_tab;
     std::unique_ptr<ConfigureInput> input_tab;
     std::unique_ptr<ConfigureNetwork> network_tab;
+    std::unique_ptr<ConfigureOpenPak> openpak_tab;
     std::unique_ptr<ConfigureProfileManager> profile_tab;
     std::unique_ptr<ConfigureSystem> system_tab;
     std::unique_ptr<ConfigureWeb> web_tab;
