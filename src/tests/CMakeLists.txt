@@ -17,6 +17,7 @@ add_executable(tests
     common/undefined_fix.cpp
     common/unique_function.cpp
     core/core_timing.cpp
+    core/file_sys/openpak_builtin_patches.cpp
     core/internal_network/network.cpp
     core/sockets/openpak_redirect.cpp
     video_core/memory_tracker.cpp
