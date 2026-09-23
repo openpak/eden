@@ -1035,7 +1035,12 @@ void MainWindow::InitializeWidgets() {
     openpak::qt::Host::SetCurrent(openpak_host);
     // MyPage's "invite friends": the library's picker, driven by mouse, keyboard or controller.
     openpak::qt::InstallFriendPicker(openpak_host, this);
+    // The OpenPak menu: the same items, in the same order, as Citron's.
     connect(ui->action_OpenPak_Account, &QAction::triggered, this, [this] {
+        if (!openpak_host->IsLinked()) {
+            openpak_host->SignIn();
+            return;
+        }
         OpenPakAccountDialog dialog(openpak_host, this);
         dialog.exec();
     });
@@ -1052,7 +1057,7 @@ void MainWindow::InitializeWidgets() {
             [this] { ui->action_OpenPak_Sign_In->setEnabled(true); ui->action_OpenPak_Sign_Out->setEnabled(false); });
     ui->action_OpenPak_Sign_In->setEnabled(!openpak_host->IsLinked());
     ui->action_OpenPak_Sign_Out->setEnabled(openpak_host->IsLinked());
-    ui->menu_Tools->insertMenu(ui->action_OpenPak_Enable_Redirection,
+    ui->menu_OpenPak->insertMenu(ui->action_OpenPak_Enable_Redirection,
                                openpak_host->CreateStartupMenu(this));
 
     // OpenPak toasts, as Ryujinx shows them: a friend coming online or starting a game, a friend

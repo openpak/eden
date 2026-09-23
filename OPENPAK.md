@@ -2,7 +2,7 @@
 
 Fork of upstream Eden (Switch, yuzu family) that plays supported Switch titles online on the
 OpenPak network. This build **is the client, not an emulator with a mode**: OpenPak is on by
-default (`enable_openpak`, *Tools → Connect to OpenPak* to turn it off for a stock test).
+default (`enable_openpak`, *OpenPak → Enable Network Redirection* to turn it off for a stock test).
 Ryujinx is the reference for the Switch integration (`emulators/prds/emulator-integration-prd.md`
 §2a): every behaviour below was ported from it, and whatever lands there next is ported here and
 to Citron. The shared parts live in `openpak-client` (`externals/openpak-client`, GitHub
@@ -16,7 +16,7 @@ frontend. Eden keeps only hook lines and the platform glue.
   account, login bound to the running title's id and version) and hands titles the id_token
   OpenPak issued (`CreateAuthorizationRequest` answers with it too).
 - **Profiles** — each Eden user profile is its own OpenPak account, one active at a time. A
-  plain launch picks the profile (*Tools → OpenPak account at startup*: last used, ask, or one
+  plain launch picks the profile (*OpenPak → OpenPak account at startup*: last used, ask, or one
   profile), offers the setup once (sign in, create an account, play offline), then goes online.
   `acc` answers only the active profile, `TrySelectUserWithoutInteraction` and the title's own
   profile picker take it, and deleting a profile forgets its account.
@@ -39,7 +39,7 @@ frontend. Eden keeps only hook lines and the platform glue.
   friend picker (`openpak/qt/friend_picker.h`), a game that names its invitees sends as it
   stands, and friend:m 30900/30901 send too.
 - **OpenPak window** — the library's account window, Ryujinx's seven pages in its order
-  (*Tools → OpenPak Account*): account, friends, invitations and players, history, cloud saves,
+  (*OpenPak → Open Account Page*): account, friends, invitations and players, history, cloud saves,
   mods (installed into `load/<title>/`), news and status.
 - **Controller** — `OpenPakHost::CreateNavigation` turns upstream's `ControllerNavigation`
   (player one's pad or the handheld's; the *controller navigation* setting) into the library's
@@ -87,7 +87,10 @@ Stardew Valley's NPLN tenant and ACNH:
 
 - `src/yuzu/openpak_host.*` — `OpenPakHost`, the library's `openpak::qt::Host`: titles, saves,
   settings, navigation, the startup picker and setup, toasts, invitations, cloud-save hooks.
-- `src/yuzu/main_window.cpp` — creates the host, installs the friend picker, the menu entries.
+- `src/yuzu/main_window.cpp`, `main.ui` — creates the host, installs the friend picker, the
+  top-level OpenPak menu (the same items and order as Citron's: Open Account Page, Sign In,
+  Sign Out, OpenPak account at startup, Enable Network Redirection). The library's dialogs are
+  the only OpenPak dialogs the build shows.
 - `src/core/hle/service/acc/acc.cpp` — the console chain, the active profile, the network
   profile fetch.
 - `src/core/hle/service/friend/openpak_friends.*`, `am/frontend/applet_my_page.*`,
