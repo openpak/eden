@@ -35,6 +35,7 @@
 #include "common/logging.h"
 #include "common/string_util.h"
 #include "openpak/platform.h"
+#include "openpak/qt/crash_report_prompt.h"
 #include "openpak/account.h"
 #include "openpak/friends_cache.h"
 #include "core/core.h"
@@ -241,6 +242,9 @@ void OpenPakHost::RunStartup(bool interactive) {
             QSettings().setValue(QStringLiteral("openpak/asked"), true);
             RunSetup(false);
         }
+
+        // A crash last time left a report; it goes nowhere unless somebody says so.
+        openpak::qt::OfferCrashReports(main_window);
     }
 
     GoOnline();
