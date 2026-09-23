@@ -220,6 +220,7 @@ QList<QStandardItem*> MakeGameListEntry(const std::string& path, const std::stri
         new GameListItemSize(size),
         new GameListItemPlayTime(play_time),
         new GameListItem(patch_versions),
+        new GameListItemOnline(program_id),
     };
 }
 } // Anonymous namespace
