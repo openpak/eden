@@ -133,14 +133,13 @@ static std::string ConfiguredIp(const std::string& setting, const char* env_var)
     return {};
 }
 
+// The library's built-in Switch families, inside the verified ceiling: the one list every OpenPak
+// client falls back to, instead of a copy of it here.
 bool IsNintendoHost(std::string_view host) {
-    static constexpr std::string_view domains[] = {"nintendo.net", "nintendo.com",
-                                                   "nintendowifi.net", "nintendo.co.jp"};
-    return std::any_of(std::begin(domains), std::end(domains), [host](std::string_view domain) {
-        return host == domain ||
-               (host.size() > domain.size() && host.ends_with(domain) &&
-                host[host.size() - domain.size() - 1] == '.');
-    });
+    static const std::vector<std::string> builtin_families =
+        openpak::NetworkProfile::BuiltIn("switch").suffixes;
+    return !host.empty() &&
+           openpak::NetworkProfile::NameInFamilies(std::string{host}, builtin_families);
 }
 
 bool IsNatCheckHost(std::string_view host) {
