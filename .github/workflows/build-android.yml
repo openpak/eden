@@ -11,15 +11,25 @@ on:
 jobs:
   android:
     name: arm64 APK
-    runs-on: [self-hosted, linux, podman, heavy]
-    # The runner is the owner's workstation: at most 8 CPUs for the build (2026-09-23).
+    runs-on: ubuntu-24.04
+    # The host's / is mounted at /host only so the step below can free disk space on it.
     container:
       image: ubuntu:24.04
-      options: --cpus 8
+      options: -v /:/host
     # Repo default is read-only, and the release step needs to write.
     permissions:
       contents: write
     steps:
+      # A hosted runner has about 14 GB free; the preinstalled toolchains this build does not use
+      # are removed from the host (mounted at /host) to make room for the build tree.
+      - name: Free disk space on the runner
+        run: |
+          df -h /host /
+          rm -rf /host/usr/share/dotnet /host/usr/local/lib/android /host/opt/ghc \
+            /host/usr/local/.ghcup /host/opt/hostedtoolcache/CodeQL /host/usr/share/swift \
+            /host/usr/local/share/powershell /host/usr/local/share/chromium /host/usr/lib/jvm
+          df -h /host /
+
       - name: Bootstrap build container
         run: |
           apt-get update -qq
@@ -32,12 +42,6 @@ jobs:
           # openpak-client is private: GITHUB_TOKEN reads only this repo.
           token: ${{ secrets.OPENPAK_MODULE_TOKEN || github.token }}
           submodules: true
-      - name: Scratch in the runner's temp, not the machine's shared /tmp
-        # /tmp is a RAM disk every build on the machine shares; when it filled on
-        # 2026-09-24 a compiler died and a job hung for hours instead of failing.
-        run: |
-          mkdir -p "$RUNNER_TEMP/scratch"
-          echo "TMPDIR=$RUNNER_TEMP/scratch" >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v4
         with:
@@ -46,15 +50,10 @@ jobs:
 
       - name: Install Android SDK and NDK
         run: |
-          # The self-hosted runner keeps its temp directory between runs: a previous run's tools are
-          # reused, and a half-finished install is started over rather than moved onto.
-          if [ ! -x "$RUNNER_TEMP/android-sdk/cmdline-tools/latest/bin/sdkmanager" ]; then
-            rm -rf "$RUNNER_TEMP/android-sdk/cmdline-tools"
-            wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-            mkdir -p "$RUNNER_TEMP/android-sdk/cmdline-tools"
-            unzip -q commandlinetools-linux-11076708_latest.zip -d "$RUNNER_TEMP/android-sdk/cmdline-tools"
-            mv "$RUNNER_TEMP/android-sdk/cmdline-tools/cmdline-tools" "$RUNNER_TEMP/android-sdk/cmdline-tools/latest"
-          fi
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O "$RUNNER_TEMP/cmdline-tools.zip"
+          mkdir -p "$RUNNER_TEMP/android-sdk/cmdline-tools"
+          unzip -q "$RUNNER_TEMP/cmdline-tools.zip" -d "$RUNNER_TEMP/android-sdk/cmdline-tools"
+          mv "$RUNNER_TEMP/android-sdk/cmdline-tools/cmdline-tools" "$RUNNER_TEMP/android-sdk/cmdline-tools/latest"
           echo "ANDROID_HOME=$RUNNER_TEMP/android-sdk" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$RUNNER_TEMP/android-sdk" >> "$GITHUB_ENV"
           yes | "$RUNNER_TEMP/android-sdk/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
@@ -62,7 +61,8 @@ jobs:
             "platform-tools" "platforms;android-36" "ndk;28.2.13676358" "cmake;3.31.6"
 
       - name: Build
-        run: NUM_JOBS=8 nice -n 10 ./.ci/android/build.sh -t standard -b Release
+        # build.sh runs as many jobs as nproc reports: the hosted runner's 4 CPUs.
+        run: ./.ci/android/build.sh -t standard -b Release
 
       # A tag publishes the APK as a release below; the artifact is for branch builds only, and a
       # full artifact quota must never stop a release (2026-09-23: it did).
@@ -80,12 +80,3 @@ jobs:
         with:
           script: |
             await require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/attach-to-release.js`)({ github, context, glob, core }, 'artifacts/*');
-
-      # The runner runs this container as root in rootful Docker: what the build left behind is
-      # handed back to the runner's own user, or the next checkout on this runner cannot clean it.
-      - name: Hand the workspace back to the runner
-        if: always()
-        run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE"
-      - name: Clear scratch
-        if: always()
-        run: rm -rf "$RUNNER_TEMP/scratch"
