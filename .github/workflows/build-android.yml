@@ -11,7 +11,7 @@ on:
 jobs:
   android:
     name: arm64 APK
-    runs-on: [self-hosted, linux, podman]
+    runs-on: [self-hosted, linux, podman, heavy]
     # The runner is the owner's workstation: at most 8 CPUs for the build (2026-09-23).
     container:
       image: ubuntu:24.04

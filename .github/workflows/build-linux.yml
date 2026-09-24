@@ -29,7 +29,7 @@ permissions:
 jobs:
   resolve:
     name: Resolve the release tag
-    runs-on: [self-hosted, linux, podman]
+    runs-on: [self-hosted, linux, podman, heavy]
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
@@ -70,7 +70,7 @@ jobs:
   appimage:
     name: x86_64 AppImage
     needs: [resolve]
-    runs-on: [self-hosted, linux, podman]
+    runs-on: [self-hosted, linux, podman, heavy]
     timeout-minutes: 180
     # The runner is the owner's workstation: at most 8 CPUs for the build (2026-09-23).
     container:
