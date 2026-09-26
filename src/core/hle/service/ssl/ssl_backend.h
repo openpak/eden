@@ -51,6 +51,14 @@ public:
     virtual size_t Pending() {
         return 0;
     }
+    // [OpenPak] Reads without consuming. Moving Out 2's T17BE websocket uses Peek as its readiness
+    // check -- it peeks every 5 ms and will not call Read until a peek reports data -- so refusing
+    // it outright stalls the title with the server's reply sitting unread in its socket. Backends
+    // that cannot peek answer WouldBlock, which is what Nintendo's libcurl reads as "alive".
+    virtual Result Peek(size_t* out_size, std::span<u8> data) {
+        *out_size = 0;
+        return ResultWouldBlock;
+    }
     virtual Result GetServerCerts(std::vector<std::vector<u8>>* out_certs) = 0;
 };
 
