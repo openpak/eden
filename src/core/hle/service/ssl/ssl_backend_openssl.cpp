@@ -302,6 +302,11 @@ public:
         return static_cast<size_t>(SSL_pending(ssl));
     }
 
+    Result Peek(size_t* out_size, std::span<u8> data) override {
+        const int ret = SSL_peek_ex(ssl, data.data(), data.size(), out_size);
+        return HandleReturn("SSL_peek_ex", out_size, ret);
+    }
+
     Result HandleReturn(const char* what, size_t* actual, int ret) {
         const int ssl_err = SSL_get_error(ssl, ret);
         CheckOpenSSLErrors();

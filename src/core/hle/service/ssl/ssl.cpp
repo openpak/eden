@@ -119,7 +119,7 @@ public:
             {10, &ISslConnection::Read, "Read"},
             {11, &ISslConnection::Write, "Write"},
             {12, &ISslConnection::Pending, "Pending"},
-            {13, nullptr, "Peek"},
+            {13, &ISslConnection::Peek, "Peek"},
             {14, nullptr, "Poll"},
             {15, nullptr, "GetVerifyCertError"},
             {16, nullptr, "GetNeededServerCertBufferSize"},
@@ -369,6 +369,11 @@ private:
         return res;
     }
 
+    Result PeekImpl(size_t* out_size, std::vector<u8>* out_data) {
+        ASSERT_OR_EXECUTE(did_handshake, { return ResultInternalError; });
+        return backend->Peek(out_size, *out_data);
+    }
+
     Result PendingImpl(s32* out_pending) {
         // Decrypted bytes the library still holds. The socket polls as not readable while these
         // wait, so a title that reads in pieces smaller than a record asks here before it polls.
@@ -459,6 +464,20 @@ private:
         if (res == ResultSuccess) {
             rb.Push(static_cast<u32>(output_bytes.size()));
             ctx.WriteBuffer(output_bytes);
+        } else {
+            rb.Push(static_cast<u32>(0));
+        }
+    }
+
+    void Peek(HLERequestContext& ctx) {
+        std::vector<u8> output_bytes(ctx.GetWriteBufferSize());
+        size_t peek_size{0};
+        const Result res = PeekImpl(&peek_size, &output_bytes);
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(res);
+        if (res == ResultSuccess) {
+            rb.Push(static_cast<u32>(peek_size));
+            ctx.WriteBuffer(std::span(output_bytes).first(peek_size));
         } else {
             rb.Push(static_cast<u32>(0));
         }
