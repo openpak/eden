@@ -1,16 +1,131 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
+
 #include <QApplication>
 #include <QHeaderView>
+#include <QPainter>
+#include <QPainterPath>
 #include <QScroller>
 #include <QScrollerProperties>
+#include <QStyledItemDelegate>
+#include <QTimer>
 
+#include "openpak/account.h"
+#include "openpak/qt/nzp_online_count.h"
+#include "openpak/qt/online_counts.h"
 #include "qt_common/config/uisettings.h"
 #include "qt_common/game_list/game_list_p.h"
 #include "qt_common/game_list/model.h"
 #include "yuzu/game/common.h"
 #include "yuzu/game/game_tree.h"
+
+namespace {
+
+// [OpenPak] The Online column with what Citron shows in it: the status, how many are playing
+// right now, and a pill beside them when the servers take another version than the installed one.
+class OnlineDelegate final : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override {
+        QStyledItemDelegate::paint(painter, option, index);
+        const QString pill_text = PillText(index);
+        if (pill_text.isEmpty()) {
+            return;
+        }
+
+        QStyleOptionViewItem opt = option;
+        initStyleOption(&opt, index);
+        const QStyle* style = opt.widget ? opt.widget->style() : QApplication::style();
+        const QRect text_rect =
+            style->subElementRect(QStyle::SE_ItemViewItemText, &opt, opt.widget);
+        const int margin = style->pixelMetric(QStyle::PM_FocusFrameHMargin, &opt, opt.widget) + 1;
+
+        QFont font = opt.font;
+        font.setPointSize(std::max(font.pointSize() - 1, 7));
+        font.setBold(true);
+        const QRect pill(text_rect.left() + margin +
+                             opt.fontMetrics.horizontalAdvance(opt.text) + pill_gap,
+                         opt.rect.top() + std::max(0, (opt.rect.height() - pill_height) / 2),
+                         QFontMetrics(font).horizontalAdvance(pill_text) + pill_padding,
+                         pill_height);
+
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        painter->setClipRect(opt.rect);
+        const QColor color(0, 190, 255);
+        QPainterPath path;
+        path.addRoundedRect(pill, pill_height / 2.0, pill_height / 2.0);
+        QColor fill = color;
+        fill.setAlpha(38);
+        painter->fillPath(path, fill);
+        painter->setPen(QPen(color, 1.2));
+        painter->drawPath(path);
+        painter->setFont(font);
+        painter->setPen(color);
+        painter->drawText(pill, Qt::AlignCenter, pill_text);
+        painter->restore();
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override {
+        QSize size = QStyledItemDelegate::sizeHint(option, index);
+        const QString pill_text = PillText(index);
+        if (!pill_text.isEmpty()) {
+            QFont font = option.font;
+            font.setBold(true);
+            size.rwidth() +=
+                pill_gap + QFontMetrics(font).horizontalAdvance(pill_text) + pill_padding;
+        }
+        return size;
+    }
+
+protected:
+    void initStyleOption(QStyleOptionViewItem* option, const QModelIndex& index) const override {
+        QStyledItemDelegate::initStyleOption(option, index);
+        if (!option->text.isEmpty()) {
+            const u64 program_id = index.sibling(index.row(), GameListModel::COLUMN_NAME)
+                                       .data(GameListItemPath::ProgramIdRole)
+                                       .toULongLong();
+            option->text = GameTree::tr("OpenPak %1 \u00B7 %2 online")
+                               .arg(option->text)
+                               .arg(OpenPak::OnlineCounts::For(program_id));
+        } else if (IsNzp(index)) {
+            option->text =
+                GameTree::tr("OpenPak: %1 online").arg(OpenPak::NzpOnlineCount::Get());
+            option->features |= QStyleOptionViewItem::HasDisplay;
+        }
+    }
+
+private:
+    static constexpr int pill_height = 20;
+    static constexpr int pill_gap = 6;
+    static constexpr int pill_padding = 16;
+
+    // NZP is homebrew: no real title ID, so it is matched by its title instead.
+    static bool IsNzp(const QModelIndex& index) {
+        return Common::OpenPakAccount::IsLinked() &&
+               index.sibling(index.row(), GameListModel::COLUMN_NAME)
+                       .data(GameListItemPath::TitleRole)
+                       .toString() == QStringLiteral("Nazi Zombies Portable");
+    }
+
+    static QString PillText(const QModelIndex& index) {
+        const QString required =
+            index.data(GameListItemOnline::RequiredVersionRole).toString();
+        if (!required.isEmpty()) {
+            return GameTree::tr("Requires %1").arg(required);
+        }
+        if (index.data(Qt::DisplayRole).toString().isEmpty() && IsNzp(index)) {
+            return GameTree::tr("Latest");
+        }
+        return {};
+    }
+};
+
+} // Anonymous namespace
 
 GameTree::GameTree(QWidget* parent) : QTreeView{parent} {
     setAlternatingRowColors(true);
@@ -26,6 +141,18 @@ GameTree::GameTree(QWidget* parent) : QTreeView{parent} {
 
     connect(this, &QTreeView::expanded, this, &GameTree::OnItemExpanded);
     connect(this, &QTreeView::collapsed, this, &GameTree::OnItemExpanded);
+
+    // [OpenPak] The player counts change under the list: draw it again as often as they are
+    // polled.
+    setItemDelegateForColumn(GameListModel::COLUMN_ONLINE, new OnlineDelegate(this));
+    auto* online_timer = new QTimer(this);
+    online_timer->setInterval(5000);
+    connect(online_timer, &QTimer::timeout, this, [this] {
+        if (isVisible() && !isColumnHidden(GameListModel::COLUMN_ONLINE)) {
+            viewport()->update();
+        }
+    });
+    online_timer->start();
 }
 
 void GameTree::SetModel(GameListModel* model) {

@@ -234,8 +234,12 @@ public:
 class GameListItemOnline : public GameListItem {
     Q_DECLARE_TR_FUNCTIONS(GameListItemOnline)
 public:
-    explicit GameListItemOnline(u64 program_id) {
+    // The version OpenPak's servers take, when the installed one is another; empty otherwise.
+    static constexpr int RequiredVersionRole = SortRole + 1;
+
+    explicit GameListItemOnline(u64 program_id, const QString& required_version = {}) {
         setData(type(), TypeRole);
+        setData(required_version, RequiredVersionRole);
         const auto entry = openpak::compatibility::Find(program_id);
         if (!entry) {
             setData(QStringLiteral("9"), SortRole);

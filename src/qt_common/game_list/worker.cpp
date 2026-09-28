@@ -28,6 +28,7 @@
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/submission_package.h"
 #include "core/loader/loader.h"
+#include "openpak/compatible_titles.h"
 
 #include "qt_common/config/uisettings.h"
 #include "qt_common/qt_common.h"
@@ -212,6 +213,19 @@ QList<QStandardItem*> MakeGameListEntry(const std::string& path, const std::stri
             return FormatPatchNameVersions(patch, loader, loader.IsRomFSUpdatable());
         });
 
+    // [OpenPak] The servers take one version of some titles. Read from the title itself and not
+    // from the cache, which an installed update does not invalidate.
+    QString required_version;
+    const auto& compatible_titles = OpenPak::CompatibleTitles::Table();
+    if (const auto it = compatible_titles.find(program_id); it != compatible_titles.end()) {
+        const auto metadata = patch.GetControlMetadata();
+        const std::string installed_version =
+            metadata.first ? metadata.first->GetVersionString() : std::string{};
+        if (!OpenPak::CompatibleTitles::IsVersionOk(program_id, installed_version)) {
+            required_version = QString::fromStdString(it->second);
+        }
+    }
+
     u64 play_time = play_time_manager.GetPlayTime(program_id);
     return QList<QStandardItem*>{
         new GameListItemPath(FormatGameName(path), icon, QString::fromStdString(name),
@@ -220,7 +234,7 @@ QList<QStandardItem*> MakeGameListEntry(const std::string& path, const std::stri
         new GameListItemSize(size),
         new GameListItemPlayTime(play_time),
         new GameListItem(patch_versions),
-        new GameListItemOnline(program_id),
+        new GameListItemOnline(program_id, required_version),
     };
 }
 } // Anonymous namespace
