@@ -110,6 +110,10 @@ void PlayTimeManager::SetProgramId(u64 program_id) {
     running_program_id = program_id;
 }
 
+u64 PlayTimeManager::GetProgramId() const {
+    return running_program_id;
+}
+
 void PlayTimeManager::Start() {
     play_time_thread = std::jthread([&](std::stop_token stop_token) { AutoTimestamp(stop_token); });
 }

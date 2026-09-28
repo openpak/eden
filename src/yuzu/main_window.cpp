@@ -2412,7 +2412,9 @@ void MainWindow::OnEmulationStopped() {
 
 void MainWindow::SyncOpenPakHistory() {
     const bool linked = Common::OpenPakAccount::IsLinked();
-    const u64 program_id = openpak_title_id;
+    // [OpenPak] The title being timed, which is not the boot title once one title has launched
+    // another.
+    const u64 program_id = play_time_manager->GetProgramId();
     const u64 seconds = play_time_manager->GetPlayTime(program_id);
 
     LOG_INFO(Frontend, "OpenPak history: linked={} title={:016X} seconds={}", linked, program_id,

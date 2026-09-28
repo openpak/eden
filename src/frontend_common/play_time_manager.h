@@ -34,6 +34,7 @@ public:
     u64 GetPlayTime(u64 program_id) const;
     void ResetProgramPlayTime(u64 program_id);
     void SetProgramId(u64 program_id);
+    u64 GetProgramId() const;
     void SetPlayTime(u64 program_id, u64 play_time);
     void Start();
     void Stop();

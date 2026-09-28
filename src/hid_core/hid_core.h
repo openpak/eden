@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 
 #include "common/common_funcs.h"
@@ -73,6 +74,16 @@ public:
     /// Removes all callbacks from input common
     void UnloadInputDevices();
 
+    /// [OpenPak] Keeps new npad buttons and sticks from the guest while an OpenPak dialog reads
+    /// the same controller, without touching what reads the controller directly: the dialog's
+    /// navigation and the hotkeys (as Citron has it).
+    void SetGuestInputSuspended(bool suspended) {
+        guest_input_suspended = suspended;
+    }
+    bool IsGuestInputSuspended() const {
+        return guest_input_suspended;
+    }
+
     /// Number of emulated controllers
     static constexpr std::size_t available_controllers{10};
 
@@ -91,6 +102,7 @@ public:
     Kernel::KernelCore& kernel;
     NpadStyleTag supported_style_tag{NpadStyleSet::All};
     NpadIdType last_active_controller{NpadIdType::Handheld};
+    std::atomic<bool> guest_input_suspended{false};
 };
 
 } // namespace Core::HID

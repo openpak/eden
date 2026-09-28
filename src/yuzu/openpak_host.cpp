@@ -1205,16 +1205,16 @@ std::string OpenPakHost::NatIp() const {
 }
 
 void OpenPakHost::SetGuestInputSuspended(bool suspended) {
-    // A dialog driven by the controller must not also drive the game behind it. Eden's HID core
-    // has no switch of its own for this, so the pads go into configuring mode: the guest then
-    // reads no buttons and no sticks, while the navigation above still hears every press.
+    // A dialog driven by the controller must not also drive the game behind it: the guest reads
+    // no buttons and no sticks, while the navigation above and the hotkeys (Home+X closes the
+    // window) still hear every press. Not configuring mode, which blanks the Home button too.
     // Counted, because a prompt opened from the window must not resume input when it closes.
     if (suspended) {
         if (guest_input_suspensions++ == 0) {
-            system.HIDCore().EnableAllControllerConfiguration();
+            system.HIDCore().SetGuestInputSuspended(true);
         }
     } else if (guest_input_suspensions > 0 && --guest_input_suspensions == 0) {
-        system.HIDCore().DisableAllControllerConfiguration();
+        system.HIDCore().SetGuestInputSuspended(false);
     }
 }
 

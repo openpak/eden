@@ -437,8 +437,13 @@ void NPad::RequestPadStateUpdate(Kernel::KernelCore& kernel, u64 aruid, Core::HI
 
     auto& pad_entry = controller.npad_pad_state;
     auto& trigger_entry = controller.npad_trigger_state;
-    const auto button_state = controller.device->GetNpadButtons();
-    const auto stick_state = controller.device->GetSticks();
+    // [OpenPak] An OpenPak dialog reading the same controller must not also drive the game
+    // behind it (as Citron has it).
+    const auto button_state = hid_core.IsGuestInputSuspended()
+                                  ? Core::HID::NpadButtonState{}
+                                  : controller.device->GetNpadButtons();
+    const auto stick_state = hid_core.IsGuestInputSuspended() ? Core::HID::AnalogSticks{}
+                                                               : controller.device->GetSticks();
 
     using btn = Core::HID::NpadButton;
     pad_entry.npad_buttons.raw = btn::None;
