@@ -10,8 +10,14 @@ on:
 
 jobs:
   android:
-    name: arm64 APK
+    # standard needs Android 13; legacy is the same code for Android 10 to 12, and installs as
+    # its own app (Eden Legacy).
+    name: arm64 APK (${{ matrix.target }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [standard, legacy]
     # The host's / is mounted at /host only so the step below can free disk space on it.
     container:
       image: ubuntu:24.04
@@ -62,7 +68,7 @@ jobs:
 
       - name: Build
         # build.sh runs as many jobs as nproc reports: the hosted runner's 4 CPUs.
-        run: ./.ci/android/build.sh -t standard -b Release
+        run: ./.ci/android/build.sh -t ${{ matrix.target }} -b Release
 
       # A tag publishes the APK as a release below; the artifact is for branch builds only, and a
       # full artifact quota must never stop a release (2026-09-23: it did).
@@ -70,7 +76,7 @@ jobs:
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         continue-on-error: true
         with:
-          name: eden-openpak-android
+          name: eden-openpak-android-${{ matrix.target }}
           path: artifacts/*
 
       # release.yml creates the tag's release; this attaches the APK once it exists.
