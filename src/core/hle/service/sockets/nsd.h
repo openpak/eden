@@ -31,6 +31,16 @@ private:
     void ResolveEx(HLERequestContext& ctx);
     void GetEnvironmentIdentifier(HLERequestContext& ctx);
     void GetApplicationServerEnvironmentType(HLERequestContext& ctx);
+    void GetEmptyName(HLERequestContext& ctx);
+    void GetEmptyNameEx(HLERequestContext& ctx);
+    void GetDeviceId(HLERequestContext& ctx);
+    void GetNasServiceSetting(HLERequestContext& ctx);
+    void GetNasServiceSettingEx(HLERequestContext& ctx);
+    void GetSaveData(HLERequestContext& ctx);
+    void ReadTestParameter(HLERequestContext& ctx);
+    void StubSuccessPrivileged(HLERequestContext& ctx);
+    void IsChangeEnvironmentIdentifierDisabled(HLERequestContext& ctx);
+    void StubSuccess(HLERequestContext& ctx);
 };
 
 } // namespace Service::Sockets

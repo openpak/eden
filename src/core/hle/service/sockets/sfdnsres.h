@@ -40,6 +40,15 @@ private:
     void GetAddrInfoRequest(HLERequestContext& ctx);
     void GetAddrInfoRequestWithOptions(HLERequestContext& ctx);
     void ResolverSetOptionRequest(HLERequestContext& ctx);
+    void SetDnsAddresses(HLERequestContext& ctx);
+    void GetDnsAddressList(HLERequestContext& ctx);
+    void GetHostByAddrRequest(HLERequestContext& ctx);
+    void GetHostStringError(HLERequestContext& ctx);
+    void GetCancelHandleRequest(HLERequestContext& ctx);
+    void CancelRequest(HLERequestContext& ctx);
+    void GetOptions(HLERequestContext& ctx);
+    void GetNameInfoRequest(HLERequestContext& ctx);
+    void GetNameInfoRequestWithOptions(HLERequestContext& ctx);
 };
 
 class DNS_PRIV final : public ServiceFramework<DNS_PRIV> {

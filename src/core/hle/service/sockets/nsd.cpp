@@ -11,6 +11,7 @@
 
 namespace Service::Sockets {
 
+constexpr Result ResultPermissionDenied{ErrorModule::NSD, 3};
 constexpr Result ResultOverflow{ErrorModule::NSD, 6};
 
 // This is nn::oe::ServerEnvironmentType
@@ -31,32 +32,32 @@ static_assert(sizeof(EnvironmentIdentifier) == 0x8);
 NSD::NSD(Core::System& system_, const char* name) : ServiceFramework{system_, name} {
     // clang-format off
     static const FunctionInfo functions[] = {
-        {5, nullptr, "GetSettingUrl"},
-        {10, nullptr, "GetSettingName"},
+        {5, &NSD::GetEmptyName, "GetSettingUrl"},
+        {10, &NSD::GetEmptyName, "GetSettingName"},
         {11, &NSD::GetEnvironmentIdentifier, "GetEnvironmentIdentifier"},
-        {12, nullptr, "GetDeviceId"},
-        {13, nullptr, "DeleteSettings"},
-        {14, nullptr, "ImportSettings"},
+        {12, &NSD::GetDeviceId, "GetDeviceId"},
+        {13, &NSD::StubSuccess, "DeleteSettings"},
+        {14, &NSD::StubSuccess, "ImportSettings"},
         {15, &NSD::SetChangeEnvironmentIdentifierDisabled, "SetChangeEnvironmentIdentifierDisabled"},
         {20, &NSD::Resolve, "Resolve"},
         {21, &NSD::ResolveEx, "ResolveEx"},
-        {30, nullptr, "GetNasServiceSetting"},
-        {31, nullptr, "GetNasServiceSettingEx"},
-        {40, nullptr, "GetNasRequestFqdn"},
-        {41, nullptr, "GetNasRequestFqdnEx"},
-        {42, nullptr, "GetNasApiFqdn"},
-        {43, nullptr, "GetNasApiFqdnEx"},
-        {50, nullptr, "GetCurrentSetting"},
-        {51, nullptr, "WriteTestParameter"},
-        {52, nullptr, "ReadTestParameter"},
-        {60, nullptr, "ReadSaveDataFromFsForTest"},
-        {61, nullptr, "WriteSaveDataToFsForTest"},
-        {62, nullptr, "DeleteSaveDataOfFsForTest"},
-        {63, nullptr, "IsChangeEnvironmentIdentifierDisabled"},
-        {64, nullptr, "SetWithoutDomainExchangeFqdns"},
+        {30, &NSD::GetNasServiceSetting, "GetNasServiceSetting"},
+        {31, &NSD::GetNasServiceSettingEx, "GetNasServiceSettingEx"},
+        {40, &NSD::GetEmptyName, "GetNasRequestFqdn"},
+        {41, &NSD::GetEmptyNameEx, "GetNasRequestFqdnEx"},
+        {42, &NSD::GetEmptyName, "GetNasApiFqdn"},
+        {43, &NSD::GetEmptyNameEx, "GetNasApiFqdnEx"},
+        {50, &NSD::GetSaveData, "GetCurrentSetting"},
+        {51, &NSD::StubSuccessPrivileged, "WriteTestParameter"},
+        {52, &NSD::ReadTestParameter, "ReadTestParameter"},
+        {60, &NSD::GetSaveData, "ReadSaveDataFromFsForTest"},
+        {61, &NSD::StubSuccessPrivileged, "WriteSaveDataToFsForTest"},
+        {62, &NSD::StubSuccessPrivileged, "DeleteSaveDataOfFsForTest"},
+        {63, &NSD::IsChangeEnvironmentIdentifierDisabled, "IsChangeEnvironmentIdentifierDisabled"},
+        {64, &NSD::StubSuccess, "SetWithoutDomainExchangeFqdns"},
         {100, &NSD::GetApplicationServerEnvironmentType, "GetApplicationServerEnvironmentType"},
-        {101, nullptr, "SetApplicationServerEnvironmentType"},
-        {102, nullptr, "DeleteApplicationServerEnvironmentType"},
+        {101, &NSD::StubSuccess, "SetApplicationServerEnvironmentType"},
+        {102, &NSD::StubSuccess, "DeleteApplicationServerEnvironmentType"},
     };
     // clang-format on
 
@@ -77,10 +78,12 @@ std::string NsdResolve(const std::string& fqdn_in) {
         fqdn.replace(pos, 1, "lp1");
     }
 
-    if (fqdn == "e97b8a9d672e4ce4845ec6947cd66ef6-sb.accounts.nintendo.com") {
+    // [OpenPak] The account names of both environments (Ryujinx FqdnResolver.cs).
+    if (fqdn == "e97b8a9d672e4ce4845ec6947cd66ef6-sb-api.accounts.nintendo.com" ||
+        fqdn == "e97b8a9d672e4ce4845ec6947cd66ef6-sb.accounts.nintendo.com") {
         return "e97b8a9d672e4ce4845ec6947cd66ef6-sb.baas.nintendo.com";
     }
-    if (fqdn == "accounts.nintendo.com") {
+    if (fqdn == "api.accounts.nintendo.com" || fqdn == "accounts.nintendo.com") {
         return "e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com";
     }
 
@@ -154,6 +157,107 @@ void NSD::GetApplicationServerEnvironmentType(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
     rb.Push(static_cast<u32>(ServerEnvironmentType::Lp));
+}
+
+// [OpenPak] The commands below are answered with empty settings rather than left unimplemented
+// (as Citron has them). Those of the test and save-data group are nsd:a's alone.
+void NSD::GetEmptyName(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    ctx.WriteBuffer(std::array<u8, 0x100>{}); // nn::nsd::Url, SettingName, Fqdn
+
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(ResultSuccess);
+}
+
+void NSD::GetEmptyNameEx(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    ctx.WriteBuffer(std::array<u8, 0x100>{}); // nn::nsd::Fqdn
+
+    IPC::ResponseBuilder rb{ctx, 4};
+    rb.Push(ResultSuccess);
+    rb.Push(ResultSuccess); // nn::nsd::InnerResult
+}
+
+void NSD::GetDeviceId(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    ctx.WriteBuffer(std::array<u8, 0x10>{}); // nn::nsd::DeviceId
+
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(ResultSuccess);
+}
+
+void NSD::GetNasServiceSetting(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    ctx.WriteBuffer(std::array<u8, 0x108>{}); // nn::nsd::NasServiceSetting
+
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(ResultSuccess);
+}
+
+void NSD::GetNasServiceSettingEx(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    ctx.WriteBuffer(std::array<u8, 0x108>{}); // nn::nsd::NasServiceSetting
+
+    IPC::ResponseBuilder rb{ctx, 4};
+    rb.Push(ResultSuccess);
+    rb.Push(ResultSuccess); // nn::nsd::InnerResult
+}
+
+void NSD::GetSaveData(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    if (GetServiceName() != "nsd:a") {
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultPermissionDenied);
+        return;
+    }
+
+    ctx.WriteBuffer(std::vector<u8>(0x12BF0)); // nn::nsd::SaveData
+
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(ResultSuccess);
+}
+
+void NSD::ReadTestParameter(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    if (GetServiceName() != "nsd:a") {
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultPermissionDenied);
+        return;
+    }
+
+    ctx.WriteBuffer(std::array<u8, 0x80>{}); // nn::nsd::detail::TestParameter
+
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(ResultSuccess);
+}
+
+void NSD::StubSuccessPrivileged(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(GetServiceName() == "nsd:a" ? ResultSuccess : ResultPermissionDenied);
+}
+
+void NSD::IsChangeEnvironmentIdentifierDisabled(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 3};
+    rb.Push(ResultSuccess);
+    rb.Push<u8>(false);
+}
+
+void NSD::StubSuccess(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(ResultSuccess);
 }
 
 NSD::~NSD() = default;

@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <charconv>
 #include <cstdlib>
 #include <optional>
 #include <string_view>
@@ -27,22 +28,22 @@ namespace Service::Sockets {
 
 SFDNSRES::SFDNSRES(Core::System& system_) : ServiceFramework{system_, "sfdnsres"} {
     static const FunctionInfo functions[] = {
-        {0, nullptr, "SetDnsAddressesPrivateRequest"},
-        {1, nullptr, "GetDnsAddressPrivateRequest"},
+        {0, &SFDNSRES::SetDnsAddresses, "SetDnsAddressesPrivateRequest"},
+        {1, &SFDNSRES::GetDnsAddressList, "GetDnsAddressPrivateRequest"},
         {2, &SFDNSRES::GetHostByNameRequest, "GetHostByNameRequest"},
-        {3, nullptr, "GetHostByAddrRequest"},
-        {4, nullptr, "GetHostStringErrorRequest"},
+        {3, &SFDNSRES::GetHostByAddrRequest, "GetHostByAddrRequest"},
+        {4, &SFDNSRES::GetHostStringError, "GetHostStringErrorRequest"},
         {5, &SFDNSRES::GetGaiStringErrorRequest, "GetGaiStringErrorRequest"},
         {6, &SFDNSRES::GetAddrInfoRequest, "GetAddrInfoRequest"},
-        {7, nullptr, "GetNameInfoRequest"},
-        {8, nullptr, "RequestCancelHandleRequest"},
-        {9, nullptr, "CancelRequest"},
+        {7, &SFDNSRES::GetNameInfoRequest, "GetNameInfoRequest"},
+        {8, &SFDNSRES::GetCancelHandleRequest, "RequestCancelHandleRequest"},
+        {9, &SFDNSRES::CancelRequest, "CancelRequest"},
         {10, &SFDNSRES::GetHostByNameRequestWithOptions, "GetHostByNameRequestWithOptions"},
-        {11, nullptr, "GetHostByAddrRequestWithOptions"},
+        {11, &SFDNSRES::GetHostByAddrRequest, "GetHostByAddrRequestWithOptions"},
         {12, &SFDNSRES::GetAddrInfoRequestWithOptions, "GetAddrInfoRequestWithOptions"},
-        {13, nullptr, "GetNameInfoRequestWithOptions"},
+        {13, &SFDNSRES::GetNameInfoRequestWithOptions, "GetNameInfoRequestWithOptions"},
         {14, &SFDNSRES::ResolverSetOptionRequest, "ResolverSetOptionRequest"},
-        {15, nullptr, "ResolverGetOptionRequest"},
+        {15, &SFDNSRES::GetOptions, "ResolverGetOptionRequest"},
     };
     RegisterHandlers(functions);
 }
@@ -58,53 +59,18 @@ enum class NetDbError : s32 {
     NoData = 4,
 };
 
-static const constexpr std::array blockedDomains = {
-    "srv.nintendo.net", //obvious
-    "nintendo.es",
-    "nintendowifi.net",
-    "nintendo-europe.com",
-    "nintendo.com.hk",
-    "nintendo.com.au",
-    "nintendo.co.kr",
-    "nintendo.co.uk",
-    "nintendo.co.jp",
-    "nintendo.co.nz",
-    "nintendo.co.za",
-    "nintendo.com",
-    "nintendo.jp",
-    "nintendo.tw",
-    "nintendo.at",
-    "nintendo.be",
-    "nintendo.dk",
-    "nintendo.de",
-    "nintendo.fi",
-    "nintendo.fr",
-    "nintendo.gr",
-    "nintendo.hu",
-    "nintendo.it",
-    "nintendo.nl",
-    "nintendo.no",
-    "nintendo.pt",
-    "nintendo.ru",
-    "nintendo.ch",
-    "nintendo.se",
-    "nintendoswitch.com.cn",
-    "nintendoswitch.com",
-    "sun.hac.lp1.d4c.nintendo.net",
-    "phoenix-api.wbagora.com", //hogwarts legacy
-    "battle.net",
-    "microsoft.com", // Minecraft dungeons + other games
-    "mojang.com",
-    "xboxlive.com",
-    "api.epicgames.dev", // marvel cosmic invasion +?
-    "minecraftservices.com",
-    "508223012e5a5ff19f30a391b2bdadc0.my.2k.com", // Civilization 5
-};
-
+// [OpenPak] The names that are never resolved for real, unless OpenPak redirects them: Nintendo's
+// own services, and nothing else. These are the six patterns of Ryujinx Patterns.cs
+// (BlockedHosts), case-insensitive, spelt as the suffixes they are.
 static bool IsBlockedHost(const std::string& host) {
-    return std::any_of(
-        blockedDomains.begin(), blockedDomains.end(),
-        [&host](const std::string& domain) { return host.find(domain) != std::string::npos; });
+    const std::string name = Common::ToLower(host);
+    return name.ends_with("-lp1.n.n.srv.nintendo.net") ||
+           name.ends_with("-lp1.s.n.srv.nintendo.net") ||
+           name.ends_with("-lp1.lp1.t.npln.srv.nintendo.net") ||
+           name.ends_with("-lp1.znc.srv.nintendo.net") ||
+           name.ends_with("-lp1.p.srv.nintendo.net") ||
+           name.ends_with("-sb-api.accounts.nintendo.com") ||
+           name.ends_with("-sb.accounts.nintendo.com") || name == "accounts.nintendo.com";
 }
 
 // [OpenPak] A title's own online hostnames are answered with the OpenPak server's address, so
@@ -263,6 +229,69 @@ static std::vector<u8> SerializeAddrInfoAsHostEnt(const std::vector<Network::Add
     return data;
 }
 
+// [OpenPak] nsd's substitution, the way hardware routes a name through nsd first: when the
+// request asks for it, or when the name carries the '%' only nsd can fill in. Skipping it leaves
+// distinct services sharing one name -- the NAT check's two probes being the case that matters,
+// since they must land on two different addresses (as Citron has it).
+static void ApplyNsdResolve(bool use_nsd_resolve, std::string& host) {
+    if (!use_nsd_resolve && host.find('%') == std::string::npos) {
+        return;
+    }
+    std::string resolved = NsdResolve(host);
+    if (resolved != host) {
+        LOG_DEBUG(Network, "nsd resolved '{}' -> '{}'", host, resolved);
+        host = std::move(resolved);
+    }
+}
+
+// [OpenPak] Hold the FIRST npln resolution of the session until the startup translation
+// storm has passed. A title's NPLN channel that comes up mid-storm parks without ever
+// sending its first RPC -- the title looks online and freezes. Measured as the OpenPak
+// npln retention on the Ryujinx side of this integration, where waiting out the burst was
+// the difference between a working channel and a startup block. One hold per process, whichever
+// request names npln first, and only for the guest's npln names.
+static void HoldFirstNplnResolution(const std::string& host) {
+    static std::once_flag npln_hold;
+    if (host.find("npln") != std::string::npos) {
+        std::call_once(npln_hold, [] {
+            LOG_INFO(Network, "[OpenPak] Holding the first npln resolution for the startup "
+                              "burst to pass");
+            std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+        });
+    }
+}
+
+// [OpenPak] A name that is already an address has nothing to resolve, and is answered as
+// itself: address and name both (Ryujinx DnsMitmResolver.cs ResolveAddress, as Citron has it).
+static std::optional<Network::AddrInfo> LiteralAddrInfo(
+    const std::string& host, const std::optional<std::string>& service) {
+    Network::IPv4Address literal_ip;
+    if (!Network::TryParseIPv4Literal(host, literal_ip)) {
+        return std::nullopt;
+    }
+
+    Network::AddrInfo entry{};
+    entry.family = Network::Domain::INET;
+    entry.socket_type = Network::Type::STREAM;
+    entry.protocol = Network::Protocol::TCP;
+    entry.addr.family = Network::Domain::INET;
+    entry.addr.ip = literal_ip;
+    entry.addr.portno = 0;
+    entry.canon_name = host;
+
+    // The port is the service when it is a number, as the host's resolver had it.
+    if (service.has_value()) {
+        u16 port = 0;
+        const char* const last = service->data() + service->size();
+        const auto [end, error] = std::from_chars(service->data(), last, port);
+        if (error == std::errc{} && end == last) {
+            entry.addr.portno = port;
+        }
+    }
+
+    return entry;
+}
+
 static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestContext& ctx) {
     struct InputParameters {
         u8 use_nsd_resolve;
@@ -281,13 +310,9 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
     std::string host = Common::StringFromBuffer(host_buffer);
     // For now, ignore options, which are in input buffer 1 for GetHostByNameRequestWithOptions.
 
-    if (parameters.use_nsd_resolve != 0) {
-        std::string resolved = NsdResolve(host);
-        if (resolved != host) {
-            LOG_DEBUG(Network, "nsd resolved '{}' -> '{}'", host, resolved);
-            host = std::move(resolved);
-        }
-    }
+    ApplyNsdResolve(parameters.use_nsd_resolve != 0, host);
+
+    HoldFirstNplnResolution(host);
 
     // [OpenPak] Redirection wins over the blocklist: these are exactly the hosts the blocklist
     // exists to stop, and pointing them at our own server is the point.
@@ -298,6 +323,11 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
     } else if (IsBlockedHost(host)) {
         LOG_WARNING(Network, "Resolution of hostname {} requested, returning EAI_AGAIN", host);
         return {0, GetAddrInfoError::AGAIN};
+    } else if (const auto literal = LiteralAddrInfo(host, std::nullopt); literal.has_value()) {
+        const std::vector<u8> data = SerializeAddrInfoAsHostEnt({*literal}, host);
+        const u32 data_size = u32(data.size());
+        ctx.WriteBuffer(data, 0);
+        return {data_size, GetAddrInfoError::SUCCESS};
     }
 
     auto res_v = Network::GetAddressInfo(query_host, /*service*/ std::nullopt);
@@ -445,31 +475,9 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
     const auto host_buffer = ctx.ReadBuffer(0);
     std::string host = Common::StringFromBuffer(host_buffer);
 
-    // Hardware routes these through nsd first, which is where the '%' in a name becomes the
-    // environment. Skipping it leaves distinct services sharing one name -- the NAT check's two
-    // probes being the case that matters, since they must land on two different addresses.
-    if (parameters.use_nsd_resolve != 0) {
-        std::string resolved = NsdResolve(host);
-        if (resolved != host) {
-            LOG_DEBUG(Network, "nsd resolved '{}' -> '{}'", host, resolved);
-            host = std::move(resolved);
-        }
-    }
+    ApplyNsdResolve(parameters.use_nsd_resolve != 0, host);
 
-    // [OpenPak] Hold the FIRST npln resolution of the session until the startup translation
-    // storm has passed. A title's NPLN channel that comes up mid-storm parks without ever
-    // sending its first RPC -- the title looks online and freezes. Measured as the OpenPak
-    // npln retention on the Ryujinx side of this integration, where waiting out the burst was
-    // the difference between a working channel and a startup block. One hold per process, and
-    // only for the guest's npln names.
-    static std::once_flag npln_hold;
-    if (host.find("npln") != std::string::npos) {
-        std::call_once(npln_hold, [] {
-            LOG_INFO(Network, "[OpenPak] Holding the first npln resolution for the startup "
-                              "burst to pass");
-            std::this_thread::sleep_for(std::chrono::milliseconds(3000));
-        });
-    }
+    HoldFirstNplnResolution(host);
 
     // [OpenPak] Redirection wins over the blocklist: these are exactly the hosts the blocklist
     // exists to stop, and pointing them at our own server is the point.
@@ -491,6 +499,15 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
     }
 
     // Serialized hints are also passed in a buffer, but are ignored for now.
+
+    if (!redirected) {
+        if (const auto literal = LiteralAddrInfo(host, service); literal.has_value()) {
+            const std::vector<u8> data = SerializeAddrInfo(OpenPakAddrInfo({*literal}), host);
+            const u32 data_size = u32(data.size());
+            ctx.WriteBuffer(data, 0);
+            return {data_size, GetAddrInfoError::SUCCESS};
+        }
+    }
 
     auto res_v = Network::GetAddressInfo(query_host, service);
     if (auto* res = std::get_if<std::vector<Network::AddrInfo>>(&res_v)) {
@@ -577,6 +594,86 @@ void SFDNSRES::ResolverSetOptionRequest(HLERequestContext& ctx) {
     rb.Push<s32>(0); // bsd errno
 }
 
+
+// [OpenPak] The commands below are answered rather than left unimplemented (as Citron has them).
+void SFDNSRES::SetDnsAddresses(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(ResultSuccess);
+}
+
+void SFDNSRES::GetDnsAddressList(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 4};
+    rb.Push(ResultSuccess);
+    rb.Push<u32>(0); // count
+    rb.PushEnum(Errno::OPNOTSUPP);
+}
+
+void SFDNSRES::GetHostByAddrRequest(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 5};
+    rb.Push(ResultSuccess);
+    rb.PushEnum(NetDbError::Internal);
+    rb.PushEnum(Errno::OPNOTSUPP);
+    rb.Push<u32>(0); // data size
+}
+
+void SFDNSRES::GetHostStringError(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 3};
+    rb.Push(ResultSuccess);
+    rb.Push<u32>(0); // data size
+}
+
+void SFDNSRES::GetCancelHandleRequest(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 3};
+    rb.Push(ResultSuccess);
+    rb.Push<u32>(0); // handle
+}
+
+void SFDNSRES::CancelRequest(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(ResultSuccess);
+}
+
+void SFDNSRES::GetOptions(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 4};
+    rb.Push(ResultSuccess);
+    rb.Push<u32>(0); // option value
+    rb.PushEnum(Errno::OPNOTSUPP);
+}
+
+void SFDNSRES::GetNameInfoRequest(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 5};
+    rb.Push(ResultSuccess);
+    rb.PushEnum(Errno::OPNOTSUPP);
+    rb.PushEnum(GetAddrInfoError::AGAIN);
+    rb.Push<u32>(0); // data size
+}
+
+void SFDNSRES::GetNameInfoRequestWithOptions(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 6};
+    rb.Push(ResultSuccess);
+    rb.Push<u32>(0); // data size
+    rb.PushEnum(GetAddrInfoError::AGAIN);
+    rb.PushEnum(NetDbError::Internal);
+    rb.PushEnum(Errno::OPNOTSUPP);
+}
 
 DNS_PRIV::DNS_PRIV(Core::System& system_)
     : ServiceFramework{system_, "dns:priv"} {
