@@ -261,22 +261,75 @@ void BSD_USA::Select(HLERequestContext& ctx) {
     LOG_DEBUG(Service, "called. nfds={} timeout={}", nfds, timeout);
 
     const auto read_set = [&ctx](size_t index) {
-        return ctx.CanReadBuffer(index) ? ctx.ReadBuffer(index) : std::span<const u8>{};
+        const auto live = ctx.CanReadBuffer(index) ? ctx.ReadBuffer(index) : std::span<const u8>{};
+        return std::vector<u8>(live.begin(), live.end());
     };
     const auto write_set = [&ctx](size_t index) {
         return std::vector<u8>(ctx.CanWriteBuffer(index) ? ctx.GetWriteBufferSize(index) : 0);
     };
 
-    ExecuteWork(ctx, SelectWork{
-                         .nfds = nfds,
-                         .timeout = timeout,
-                         .read_in = read_set(0),
-                         .write_in = read_set(1),
-                         .error_in = read_set(2),
-                         .read_out = write_set(0),
-                         .write_out = write_set(1),
-                         .error_out = write_set(2),
-                     });
+    // [OpenPak] The parked select (Ryujinx IClient.cs Select). A select with an event fd in its
+    // sets is ended by another guest thread's Write() to that event fd, which a wait held on
+    // this thread would keep queued behind itself. So: one non-blocking pass, and with nothing
+    // ready the request is parked the way a deferred Poll is, re-run by the deferral heartbeat
+    // until something is ready or the park window is over. The window is fixed, not the guest's
+    // timeout: that argument is a 16-byte timeval read here as one s32.
+    constexpr auto SelectParkWindow = std::chrono::milliseconds{100};
+
+    DeferredSelectState state;
+    bool had_snapshot = false;
+    {
+        std::scoped_lock snapshot_lock{deferred_poll_snapshot_mutex};
+        if (const auto it = deferred_select_snapshots.find(&ctx);
+            it != deferred_select_snapshots.end()) {
+            state = it->second;
+            had_snapshot = true;
+        }
+    }
+    if (!had_snapshot) {
+        state.read_in = read_set(0);
+        state.write_in = read_set(1);
+        state.error_in = read_set(2);
+    }
+
+    const bool parkable =
+        nfds > 0 && GetBsdDeferralEvent() != nullptr &&
+        SelectSetIncludesEventFd(state.read_in, state.write_in, state.error_in);
+
+    SelectWork work{
+        .nfds = nfds,
+        .timeout = parkable ? 0 : timeout,
+        .read_in = state.read_in,
+        .write_in = state.write_in,
+        .error_in = state.error_in,
+        .read_out = write_set(0),
+        .write_out = write_set(1),
+        .error_out = write_set(2),
+    };
+    work.Execute(this);
+
+    if (parkable && work.ret == 0 && work.bsd_errno == Errno::SUCCESS) {
+        if (!had_snapshot) {
+            // Nothing ready yet: keep the sets as they were read, since the re-run must not
+            // read guest memory again, and give the thread up.
+            state.deadline = std::chrono::steady_clock::now() + SelectParkWindow;
+            std::scoped_lock snapshot_lock{deferred_poll_snapshot_mutex};
+            deferred_select_snapshots[&ctx] = std::move(state);
+            ctx.SetIsDeferred();
+            return;
+        }
+        if (std::chrono::steady_clock::now() < state.deadline) {
+            ctx.SetIsDeferred();
+            return;
+        }
+        // The window is over: answered below as 0 with no error, the three sets cleared.
+    }
+
+    if (had_snapshot) {
+        std::scoped_lock snapshot_lock{deferred_poll_snapshot_mutex};
+        deferred_select_snapshots.erase(&ctx);
+    }
+    work.Response(ctx);
 }
 
 void BSD_USA::Poll(HLERequestContext& ctx) {
@@ -1469,6 +1522,20 @@ void SetFdInMask(std::vector<u8>& mask, s32 fd) {
 
 } // Anonymous namespace
 
+// [OpenPak] Whether any of a select's three sets names an event fd, which is what makes it one
+// to park rather than wait on (see Select).
+bool BSD_USA::SelectSetIncludesEventFd(std::span<const u8> read_in, std::span<const u8> write_in,
+                                       std::span<const u8> error_in) const {
+    std::vector<s32> fds;
+    ExtractFdsFromMask(read_in, fds);
+    ExtractFdsFromMask(write_in, fds);
+    ExtractFdsFromMask(error_in, fds);
+    return std::ranges::any_of(fds, [](s32 fd) {
+        return fd < static_cast<s32>(MAX_FD) && file_descriptors[fd] &&
+               file_descriptors[fd]->event_value;
+    });
+}
+
 // [OpenPak] select() over poll() (as Citron has it). An event fd is answered from its counter,
 // as in PollImpl, because the host has nothing to say about one.
 std::pair<s32, Errno> BSD_USA::SelectImpl(s32 nfds, s32 timeout, std::span<const u8> read_in,
@@ -1544,7 +1611,8 @@ std::pair<s32, Errno> BSD_USA::SelectImpl(s32 nfds, s32 timeout, std::span<const
     };
 
     // The host cannot see an event fd being written, so a wait with one in the set is a bounded
-    // one, and the counters are read again after it.
+    // one, and the counters are read again after it. This is the path taken only when the select
+    // could not be parked (see Select), which asks for no wait at all.
     constexpr s32 EventFdSelectSliceMs = 250;
     s32 host_timeout = timeout;
     if (any_event_ready()) {
@@ -1628,10 +1696,13 @@ Errno BSD_USA::BindImpl(s32 fd, std::span<const u8> addr) {
     if (!IsFileDescriptorValid(fd)) {
         return Errno::BADF;
     }
-    ASSERT(addr.size() >= 16);
     if (!file_descriptors[fd]->socket) {
         LOG_WARNING(Service, "Uninitialized socket");
         return Errno::BADF;
+    }
+    // [OpenPak] A sockaddr shorter than a sockaddr_in is refused, not asserted on.
+    if (addr.size() < 16) {
+        return Errno::INVAL;
     }
 
     auto addr_in = GetValue<SockAddrIn>(addr);
@@ -1721,10 +1792,13 @@ Errno BSD_USA::ConnectImpl(s32 fd, std::span<const u8> addr) {
         return Errno::BADF;
     }
 
-    ASSERT(addr.size() >= 16);
     if (!file_descriptors[fd]->socket) {
         LOG_WARNING(Service, "Uninitialized socket");
         return Errno::BADF;
+    }
+    // [OpenPak] A sockaddr shorter than a sockaddr_in is refused, not asserted on.
+    if (addr.size() < 16) {
+        return Errno::INVAL;
     }
 
     // [OpenPak] An IPv6 sockaddr arrives as {len, family=28, port, flowinfo, addr[16], scope}:
@@ -2275,7 +2349,10 @@ std::pair<s32, Errno> BSD_USA::SendToImpl(s32 fd, u32 flags, std::span<const u8>
     Network::SockAddrIn addr_in;
     Network::SockAddrIn* p_addr_in = nullptr;
     if (!addr.empty()) {
-        ASSERT(addr.size() >= 16);
+        // [OpenPak] A sockaddr shorter than a sockaddr_in is refused, not asserted on.
+        if (addr.size() < 16) {
+            return {-1, Errno::INVAL};
+        }
         auto guest_addr_in = GetValue<SockAddrIn>(addr);
         addr_in = Translate(guest_addr_in);
         p_addr_in = &addr_in;
@@ -2488,6 +2565,14 @@ BSD_USA::BSD_USA(Core::System& system_, const char* name, bool is_user_)
 
     RegisterHandlers(functions);
 
+    ++instance_count;
+
+    // [OpenPak] The descriptor table is shared by bsd:u, bsd:s and bsd:a, so one of them
+    // listening is enough: every instance listening would hand each packet to each socket once
+    // per instance (as Citron has it).
+    if (!is_user) {
+        return;
+    }
     if (auto room_member = Network::GetRoomMember().lock()) {
         proxy_packet_received = room_member->BindOnProxyPacketReceived(
             [this](const Network::ProxyPacket& packet) { OnProxyPacketReceived(packet); });
@@ -2497,8 +2582,18 @@ BSD_USA::BSD_USA(Core::System& system_, const char* name, bool is_user_)
 }
 
 BSD_USA::~BSD_USA() {
-    if (auto room_member = Network::GetRoomMember().lock()) {
-        room_member->Unbind(proxy_packet_received);
+    if (is_user) {
+        if (auto room_member = Network::GetRoomMember().lock()) {
+            room_member->Unbind(proxy_packet_received);
+        }
+    }
+
+    // [OpenPak] The shared table outlives any one service: it is emptied when the last of them
+    // goes, or sockets and bound ports survive into the next emulated session (as Citron has it).
+    if (--instance_count == 0) {
+        for (auto& descriptor : file_descriptors) {
+            descriptor.reset();
+        }
     }
 }
 

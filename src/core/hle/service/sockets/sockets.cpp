@@ -73,7 +73,7 @@ void LoopProcess(Core::System& system) {
     server_manager->RegisterNamedService("ethc:i", std::make_shared<ETHC_I>(system));
     server_manager->RegisterNamedService("bsd:s", std::make_shared<BSD_USA>(system, "bsd:s", false));
     server_manager->RegisterNamedService("bsd:u", std::make_shared<BSD_USA>(system, "bsd:u", true));
-    server_manager->RegisterNamedService("bsd:a", std::make_shared<BSD_USA>(system, "bsd:a", true));
+    server_manager->RegisterNamedService("bsd:a", std::make_shared<BSD_USA>(system, "bsd:a", false));
     server_manager->RegisterNamedService("bsd:nu", std::make_shared<BSD_NU>(system));
     server_manager->RegisterNamedService("bsdcfg", std::make_shared<BSDCFG>(system, "bsdcfg"));
     server_manager->RegisterNamedService("ifcfg", std::make_shared<BSDCFG>(system, "ifcfg"));
