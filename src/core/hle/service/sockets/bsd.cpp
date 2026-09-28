@@ -788,6 +788,10 @@ void BSD_USA::Recv(HLERequestContext& ctx) {
 
     LOG_DEBUG(Service, "called. fd={} flags={:#x} len={}", fd, flags, ctx.GetWriteBufferSize());
 
+    if (DeferBlockingReceive(ctx, fd, flags)) {
+        return;
+    }
+
     ExecuteWork(ctx, RecvWork{
                          .fd = fd,
                          .flags = flags,
@@ -803,6 +807,10 @@ void BSD_USA::RecvFrom(HLERequestContext& ctx) {
 
     LOG_DEBUG(Service, "called. fd={} flags={:#x} len={} addrlen={}", fd, flags,
               ctx.GetWriteBufferSize(0), ctx.GetWriteBufferSize(1));
+
+    if (DeferBlockingReceive(ctx, fd, flags)) {
+        return;
+    }
 
     ExecuteWork(ctx, RecvFromWork{
                          .fd = fd,
@@ -1740,6 +1748,7 @@ Errno BSD_USA::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<cons
     case OptName::SNDTIMEO:
         return Translate(socket->SetSndTimeo(value));
     case OptName::RCVTIMEO:
+        file_descriptors[fd]->has_receive_timeout = value != 0;
         return Translate(socket->SetRcvTimeo(value));
     case OptName::NOSIGPIPE:
         LOG_WARNING(Service, "(STUBBED) setting NOSIGPIPE to {}", value);
@@ -2016,6 +2025,44 @@ s32 BSD_USA::FindFreeFileDescriptorHandle() noexcept {
         }
     }
     return -1;
+}
+
+// [OpenPak] A blocking recv on a datagram socket with nothing to read sat inside the host recv on
+// one of the three threads every socket of the title shares. A game that binds a UDP port and waits
+// for a peer waits forever, and one such wait per thread stops everything else with it: on Ryujinx
+// Terraria's NPLN stream went silent in the same microsecond as its blocking recvfrom on udp/8888
+// (openpak/ryujinx 001c04871). The request is parked the way a deferred poll is, and the deferral
+// heartbeat re-runs it until the socket is readable.
+//
+// Datagram sockets only, as on Ryujinx. A socket with a receive timeout returns by itself and is
+// left alone, so its timeout stays the host's to keep; a socket closed while its recv is parked
+// answers EBADF on the next pass.
+bool BSD_USA::DeferBlockingReceive(HLERequestContext& ctx, s32 fd, u32 flags) {
+    if (GetBsdDeferralEvent() == nullptr || fd < 0 || fd >= static_cast<s32>(MAX_FD) ||
+        !file_descriptors[fd]) {
+        return false;
+    }
+    FileDescriptor& descriptor = *file_descriptors[fd];
+    if (!descriptor.socket || descriptor.is_connection_based || descriptor.event_value ||
+        descriptor.has_receive_timeout ||
+        (descriptor.flags & Network::FLAG_O_NONBLOCK) != 0 ||
+        (flags & Network::FLAG_MSG_DONTWAIT) != 0) {
+        return false;
+    }
+    // A socket with no host descriptor (a room proxy) cannot be polled here.
+    if (descriptor.socket->GetFD() == static_cast<decltype(descriptor.socket->GetFD())>(-1)) {
+        return false;
+    }
+
+    std::vector<Network::PollFD> probe{
+        Network::PollFD{descriptor.socket.get(), Network::PollEvents::In, Network::PollEvents{}}};
+    if (Network::Poll(probe, 0).first != 0) {
+        // Readable, or in error and about to say so: answer in this pass.
+        return false;
+    }
+
+    ctx.SetIsDeferred();
+    return true;
 }
 
 bool BSD_USA::IsFileDescriptorValid(s32 fd) const noexcept {

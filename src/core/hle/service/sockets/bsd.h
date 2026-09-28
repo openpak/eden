@@ -61,6 +61,9 @@ private:
         // straight back before trusting the socket: a set that answers SUCCESS and a get that
         // answers NOPROTOOPT reads as a broken socket, and the whole connection is abandoned.
         std::map<u64, std::vector<u8>> feigned_sockopts;
+        // [OpenPak] A receive timeout is set. Such a recv returns on its own, so it is never parked
+        // (see DeferBlockingReceive).
+        bool has_receive_timeout = false;
     };
 
     struct PollWork {
@@ -193,6 +196,7 @@ private:
 
     s32 FindFreeFileDescriptorHandle() noexcept;
     bool IsFileDescriptorValid(s32 fd) const noexcept;
+    bool DeferBlockingReceive(HLERequestContext& ctx, s32 fd, u32 flags);
 
     bool PollSetIncludesEventFd(std::span<const u8> read_buffer, s32 nfds) const;
 
