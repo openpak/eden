@@ -173,6 +173,7 @@ private:
     std::set<u64> last_known_requests;
     bool first_poll = true; // suppresses a toast burst for every friend already online at boot
     std::string active_profile; // the profile everything shown here belongs to
+    int guest_input_suspensions = 0; // OpenPak dialogs open right now, see SetGuestInputSuspended
 
     OpenPakChatClient* chat_client = nullptr;
     QString pending_chat_room_id; // set by whichever create/join is in flight, used to tag ChatMemberJoined

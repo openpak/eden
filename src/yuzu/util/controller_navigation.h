@@ -29,9 +29,14 @@ public:
 
 signals:
     void TriggerKeyboardEvent(Qt::Key key);
+    // [OpenPak] The buttons the OpenPak dialogs use that have no keyboard equivalent.
+    void leftShoulderPressed();          // L / ZL
+    void rightShoulderPressed();         // R / ZR
+    void auxiliaryAction(int action_id); // X
 
 private:
     void TriggerButton(Settings::NativeButton::Values native_button, Qt::Key key);
+    bool IsNewlyPressed(Settings::NativeButton::Values native_button) const;
     void ControllerUpdateEvent(Core::HID::ControllerTriggerType type);
 
     void ControllerUpdateButton();

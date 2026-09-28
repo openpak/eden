@@ -96,6 +96,20 @@ public:
             }
             emit activityDetected();
         }, Qt::QueuedConnection);
+        // The shoulder buttons and X, as Citron maps them: L is also a cancel there.
+        connect(source, &ControllerNavigation::leftShoulderPressed, this, [this] {
+            emit cancelled();
+            emit leftShoulderPressed();
+            emit activityDetected();
+        }, Qt::QueuedConnection);
+        connect(source, &ControllerNavigation::rightShoulderPressed, this, [this] {
+            emit rightShoulderPressed();
+            emit activityDetected();
+        }, Qt::QueuedConnection);
+        connect(source, &ControllerNavigation::auxiliaryAction, this, [this](int action_id) {
+            emit auxiliaryAction(action_id);
+            emit activityDetected();
+        }, Qt::QueuedConnection);
     }
 };
 
@@ -1190,8 +1204,18 @@ std::string OpenPakHost::NatIp() const {
     return Settings::values.openpak_nat_ip.GetValue();
 }
 
-void OpenPakHost::SetGuestInputSuspended(bool) {
-    // Eden has no guest-input suspension; the OpenPak dialogs are modal, which is enough.
+void OpenPakHost::SetGuestInputSuspended(bool suspended) {
+    // A dialog driven by the controller must not also drive the game behind it. Eden's HID core
+    // has no switch of its own for this, so the pads go into configuring mode: the guest then
+    // reads no buttons and no sticks, while the navigation above still hears every press.
+    // Counted, because a prompt opened from the window must not resume input when it closes.
+    if (suspended) {
+        if (guest_input_suspensions++ == 0) {
+            system.HIDCore().EnableAllControllerConfiguration();
+        }
+    } else if (guest_input_suspensions > 0 && --guest_input_suspensions == 0) {
+        system.HIDCore().DisableAllControllerConfiguration();
+    }
 }
 
 openpak::qt::Navigation* OpenPakHost::CreateNavigation(QObject* parent) {

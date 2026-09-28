@@ -37,6 +37,10 @@ void ControllerNavigation::TriggerButton(Settings::NativeButton::Values native_b
     }
 }
 
+bool ControllerNavigation::IsNewlyPressed(Settings::NativeButton::Values native_button) const {
+    return button_values[native_button].value && !button_values[native_button].locked;
+}
+
 void ControllerNavigation::ControllerUpdateEvent(Core::HID::ControllerTriggerType type) {
     std::scoped_lock lock{mutex};
     if (!Settings::values.controller_navigation) {
@@ -76,6 +80,18 @@ void ControllerNavigation::ControllerUpdateButton() {
         TriggerButton(Settings::NativeButton::DLeft, Qt::Key_Left);
         TriggerButton(Settings::NativeButton::DRight, Qt::Key_Right);
         TriggerButton(Settings::NativeButton::DUp, Qt::Key_Up);
+        // [OpenPak] L/R switch pages in the OpenPak window; nothing else listens to these.
+        if (IsNewlyPressed(Settings::NativeButton::L) ||
+            IsNewlyPressed(Settings::NativeButton::ZL)) {
+            emit leftShoulderPressed();
+        }
+        if (IsNewlyPressed(Settings::NativeButton::R) ||
+            IsNewlyPressed(Settings::NativeButton::ZR)) {
+            emit rightShoulderPressed();
+        }
+        if (IsNewlyPressed(Settings::NativeButton::X)) {
+            emit auxiliaryAction(0);
+        }
         break;
     case Core::HID::NpadStyleIndex::JoyconLeft:
         TriggerButton(Settings::NativeButton::DDown, Qt::Key_Enter);
