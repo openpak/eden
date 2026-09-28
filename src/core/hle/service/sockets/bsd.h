@@ -53,9 +53,14 @@ private:
         std::shared_ptr<Network::SocketBase> socket;
         s32 flags = 0;
         bool is_connection_based = false;
+        // [OpenPak] A datagram socket the guest opened. While one is open a blocking poll is cut
+        // short, so the thread it holds gets back to the datagram transport (see PollImpl).
+        bool is_datagram = false;
         // [OpenPak] Non-null makes this an event fd: the counter a read returns and clears, with
         // the socket above serving only to make it pollable.
         std::shared_ptr<std::atomic<u64>> event_value;
+        // [OpenPak] EventFdFlags::Semaphore: a read takes one from the counter and answers 1.
+        bool event_semaphore = false;
         // [OpenPak] Options the set side tolerated but never applied, keyed by level and
         // optname. A title's network stack (NPLN's gRPC above all) sets an option and reads it
         // straight back before trusting the socket: a set that answers SUCCESS and a get that
@@ -74,6 +79,22 @@ private:
         s32 timeout;
         std::span<const u8> read_buffer;
         std::vector<u8> write_buffer;
+        s32 ret{};
+        Errno bsd_errno{};
+    };
+
+    struct SelectWork {
+        void Execute(BSD_USA* bsd);
+        void Response(HLERequestContext& ctx);
+
+        s32 nfds;
+        s32 timeout;
+        std::span<const u8> read_in;
+        std::span<const u8> write_in;
+        std::span<const u8> error_in;
+        std::vector<u8> read_out;
+        std::vector<u8> write_out;
+        std::vector<u8> error_out;
         s32 ret{};
         Errno bsd_errno{};
     };
@@ -171,12 +192,21 @@ private:
     void Close(HLERequestContext& ctx);
     void DuplicateSocket(HLERequestContext& ctx);
     void EventFd(HLERequestContext& ctx);
+    void Open(HLERequestContext& ctx);
+    void Ioctl(HLERequestContext& ctx);
+    void RegisterClientShared(HLERequestContext& ctx);
+    void GetThreadCoreMask(HLERequestContext& ctx);
+    void Unsupported(HLERequestContext& ctx);
 
     template <typename Work>
     void ExecuteWork(HLERequestContext& ctx, Work work);
 
     std::pair<s32, Errno> SocketImpl(Domain domain, Type type, Protocol protocol);
     std::pair<s32, Errno> PollImpl(std::vector<u8>& write_buffer, std::span<const u8> read_buffer, s32 nfds, s32 timeout);
+    std::pair<s32, Errno> SelectImpl(s32 nfds, s32 timeout, std::span<const u8> read_in,
+                                     std::span<const u8> write_in, std::span<const u8> error_in,
+                                     std::vector<u8>& read_out, std::vector<u8>& write_out,
+                                     std::vector<u8>& error_out);
     std::pair<s32, Errno> AcceptImpl(s32 fd, std::vector<u8>& write_buffer);
     Errno BindImpl(s32 fd, std::span<const u8> addr);
     Errno ConnectImpl(s32 fd, std::span<const u8> addr);
@@ -228,6 +258,9 @@ class BSDCFG final : public ServiceFramework<BSDCFG> {
 public:
     explicit BSDCFG(Core::System& system_, const char *name);
     ~BSDCFG() override;
+
+private:
+    void Unsupported(HLERequestContext& ctx);
 };
 
 class BSD_NU final : public ServiceFramework<BSD_NU> {

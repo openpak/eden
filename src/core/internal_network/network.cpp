@@ -159,6 +159,18 @@ Errno TranslateNativeError(int e, CallType call_type = CallType::Other) {
         return Errno::INPROGRESS;
     case WSAEISCONN:
         return Errno::ISCONN;
+    case WSAENOPROTOOPT:
+        return Errno::NOPROTOOPT;
+    case WSAEDESTADDRREQ:
+        return Errno::DESTADDRREQ;
+    case WSAEAFNOSUPPORT:
+        return Errno::AFNOSUPPORT;
+    case WSAEOPNOTSUPP:
+        return Errno::OPNOTSUPP;
+    case WSAEALREADY:
+        return Errno::ALREADY;
+    case WSAEACCES:
+        return Errno::ACCES;
     default:
         UNIMPLEMENTED_MSG("Unimplemented errno={}", e);
         return Errno::OTHER;
@@ -300,6 +312,20 @@ Errno TranslateNativeError(int e, CallType call_type = CallType::Other) {
         return Errno::INPROGRESS;
     case EISCONN:
         return Errno::ISCONN;
+    case ENOPROTOOPT:
+        return Errno::NOPROTOOPT;
+    case EDESTADDRREQ:
+        return Errno::DESTADDRREQ;
+    case EAFNOSUPPORT:
+        return Errno::AFNOSUPPORT;
+    case EOPNOTSUPP:
+        return Errno::OPNOTSUPP;
+    case EALREADY:
+        return Errno::ALREADY;
+    case EPERM:
+        return Errno::PERM;
+    case EACCES:
+        return Errno::ACCES;
     default:
         UNIMPLEMENTED_MSG("Unimplemented errno={} ({})", e, strerror(e));
         return Errno::OTHER;
@@ -652,6 +678,18 @@ SockAddrIn TranslateToSockAddrIn(const sockaddr_storage& input, size_t input_len
     return TranslateToSockAddrIn(reinterpret_cast<const sockaddr_in&>(input), input_len);
 }
 
+/// [OpenPak] The IPv4 address a dual-mode v6 socket is given, in the mapped form (as Citron has
+/// it).
+sockaddr_in6 TranslateToMappedV6(const SockAddrIn& input) {
+    sockaddr_in6 result{};
+    result.sin6_family = AF_INET6;
+    result.sin6_port = htons(input.portno);
+    result.sin6_addr.s6_addr[10] = 0xff;
+    result.sin6_addr.s6_addr[11] = 0xff;
+    std::memcpy(result.sin6_addr.s6_addr + 12, input.ip.data(), input.ip.size());
+    return result;
+}
+
 short TranslatePollEvents(PollEvents events) {
     short result = 0;
 
@@ -750,6 +788,10 @@ std::string IPv4AddressToString(IPv4Address ip_addr) {
     std::array<char, INET_ADDRSTRLEN> buf = {};
     ASSERT(inet_ntop(AF_INET, &ip_addr, buf.data(), sizeof(buf)) == buf.data());
     return std::string(buf.data());
+}
+
+bool TryParseIPv4Literal(const std::string& host, IPv4Address& out) {
+    return inet_pton(AF_INET, host.c_str(), out.data()) == 1;
 }
 
 u32 IPv4AddressToInteger(IPv4Address ip_addr) {
@@ -862,8 +904,13 @@ Errno Socket::SetSockOpt(SOCKET fd_so, int option, T value) {
 
 Errno Socket::Initialize(Domain domain_, Type type, Protocol protocol) {
     domain = domain_;
-    fd = socket(TranslateDomainToNative(domain_), TranslateTypeToNative(type),
-                TranslateProtocolToNative(protocol));
+    // [OpenPak] RAW + ICMP is what a title pings its regions with, and Among Us abandons its
+    // sign-in when the socket cannot be made. A raw socket needs root; an unprivileged ping
+    // socket (DGRAM + ICMP) gives the same echo, the kernel filling in the header and checksum
+    // (as Citron has it).
+    is_ping_socket = type == Type::RAW && protocol == Protocol::ICMP;
+    const int native_type = is_ping_socket ? SOCK_DGRAM : TranslateTypeToNative(type);
+    fd = socket(TranslateDomainToNative(domain_), native_type, TranslateProtocolToNative(protocol));
     if (fd != INVALID_SOCKET) {
         // [OpenPak] A dual-mode v6 socket, so a title's IPv6 socket can reach the IPv4 world:
         // a title's gRPC stack (NPLN) dials its IPv6 socket with the v4-mapped resolver answer,
@@ -880,7 +927,9 @@ Errno Socket::Initialize(Domain domain_, Type type, Protocol protocol) {
 }
 
 std::pair<SocketBase::AcceptResult, Errno> Socket::Accept() {
-    sockaddr_in addr;
+    // [OpenPak] Storage for either family: a dual-mode v6 listener reports its IPv4 peers in the
+    // mapped form, which does not fit a sockaddr_in (as Citron has it, for Stardew).
+    sockaddr_storage addr{};
     socklen_t addrlen = sizeof(addr);
 
     const bool wait_for_accept = !is_non_blocking;
@@ -1035,7 +1084,8 @@ std::pair<s32, Errno> Socket::RecvFrom(int flags, std::span<u8> message, SockAdd
     ASSERT(flags == 0);
     ASSERT(message.size() < static_cast<size_t>((std::numeric_limits<int>::max)()));
 
-    sockaddr_in addr_in{};
+    // [OpenPak] Storage for either family, as in Accept.
+    sockaddr_storage addr_in{};
     socklen_t addrlen = sizeof(addr_in);
     socklen_t* const p_addrlen = addr ? &addrlen : nullptr;
     sockaddr* const p_addr_in = addr ? reinterpret_cast<sockaddr*>(&addr_in) : nullptr;
@@ -1073,13 +1123,36 @@ std::pair<s32, Errno> Socket::SendTo(u32 flags, std::span<const u8> message,
                                      const SockAddrIn* addr) {
     ASSERT(flags == 0);
 
-    const sockaddr* to = nullptr;
-    const int to_len = addr ? sizeof(sockaddr) : 0;
-    sockaddr host_addr_in;
+    // [OpenPak] A ping socket matches replies by the echo identifier, and on an unbound one the
+    // kernel puts its own in place of the sender's. Bound to the identifier of the guest's first
+    // echo request (type 8, identifier at bytes 4..5), the kernel keeps it (as Citron has it).
+    if (is_ping_socket && !ping_id_bound && message.size() >= 6 && message[0] == 8) {
+        sockaddr_in bind_addr{};
+        bind_addr.sin_family = AF_INET;
+        bind_addr.sin_port = htons(static_cast<u16>((message[4] << 8) | message[5]));
+        bind_addr.sin_addr.s_addr = INADDR_ANY;
+        if (bind(fd, reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) == SOCKET_ERROR) {
+            // Not fatal: the ping goes out under the identifier the kernel chose.
+            void(GetAndLogLastError(CallType::Send));
+        }
+        ping_id_bound = true;
+    }
 
-    if (addr) {
+    const sockaddr* to = nullptr;
+    int to_len = 0;
+    sockaddr host_addr_in;
+    sockaddr_in6 host_addr_in6;
+
+    // [OpenPak] A dual-mode v6 socket is told where to send in the mapped form, as Connect is
+    // (as Citron has it, for Stardew).
+    if (addr && domain == Domain::INET6) {
+        host_addr_in6 = TranslateToMappedV6(*addr);
+        to = reinterpret_cast<const sockaddr*>(&host_addr_in6);
+        to_len = sizeof(host_addr_in6);
+    } else if (addr) {
         host_addr_in = TranslateFromSockAddrIn(*addr);
         to = &host_addr_in;
+        to_len = sizeof(host_addr_in);
     }
 
     const auto result = sendto(fd, reinterpret_cast<const char*>(message.data()),

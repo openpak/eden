@@ -204,6 +204,10 @@ public:
 private:
     bool is_non_blocking = false;
     Domain domain = Domain::Unspecified;
+    // [OpenPak] A guest RAW + ICMP socket, opened as an unprivileged ping socket; bound once, to
+    // the identifier of the first echo request (see Socket::Initialize and SendTo).
+    bool is_ping_socket = false;
+    bool ping_id_bound = false;
 };
 
 std::pair<s32, Errno> Poll(std::vector<PollFD>& poll_fds, s32 timeout);

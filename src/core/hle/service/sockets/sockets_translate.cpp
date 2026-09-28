@@ -43,9 +43,33 @@ Errno Translate(Network::Errno value) {
         return Errno::INPROGRESS;
     case Network::Errno::ISCONN:
         return Errno::ISCONN;
+    case Network::Errno::HOSTUNREACH:
+        return Errno::HOSTUNREACH;
+    case Network::Errno::NETUNREACH:
+        return Errno::NETUNREACH;
+    case Network::Errno::NETDOWN:
+        return Errno::NETDOWN;
+    case Network::Errno::MSGSIZE:
+        return Errno::MSGSIZE;
+    case Network::Errno::NOPROTOOPT:
+        return Errno::NOPROTOOPT;
+    case Network::Errno::DESTADDRREQ:
+        return Errno::DESTADDRREQ;
+    case Network::Errno::AFNOSUPPORT:
+        return Errno::AFNOSUPPORT;
+    case Network::Errno::OPNOTSUPP:
+        return Errno::OPNOTSUPP;
+    case Network::Errno::ALREADY:
+        return Errno::ALREADY;
+    case Network::Errno::PERM:
+        return Errno::PERM;
+    case Network::Errno::ACCES:
+        return Errno::ACCES;
     default:
-        UNIMPLEMENTED_MSG("Unimplemented errno={}", value);
-        return Errno::SUCCESS;
+        // [OpenPak] A host error with no mapping is a failure, and must read as one: SUCCESS
+        // next to a return of -1 tells the guest nothing went wrong.
+        LOG_WARNING(Service, "Unmapped errno={}, answering EINVAL", value);
+        return Errno::INVAL;
     }
 }
 

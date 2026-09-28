@@ -50,6 +50,13 @@ enum class Errno {
     MSGSIZE,
     INPROGRESS,
     ISCONN,
+    NOPROTOOPT,
+    DESTADDRREQ,
+    AFNOSUPPORT,
+    OPNOTSUPP,
+    ALREADY,
+    PERM,
+    ACCES,
     OTHER,
 };
 
@@ -122,6 +129,10 @@ constexpr IPv4Address TranslateIPv4(in_addr addr) {
 std::optional<IPv4Address> GetHostIPv4Address();
 
 std::string IPv4AddressToString(IPv4Address ip_addr);
+
+/// [OpenPak] Whether a host name is already a dotted IPv4 address, and which. Such a name has
+/// nothing to resolve (as Citron has it).
+bool TryParseIPv4Literal(const std::string& host, IPv4Address& out);
 u32 IPv4AddressToInteger(IPv4Address ip_addr);
 
 // named to avoid name collision with Windows macro

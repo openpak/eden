@@ -6,11 +6,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -45,6 +48,10 @@ bool IsConnectionBased(Type type) {
         return true;
     case Type::DGRAM:
         return false;
+    case Type::RAW:
+        // [OpenPak] Only reached for RAW + ICMP (see SocketImpl); echo pings are connectionless
+        // (as Citron has it).
+        return false;
     default:
         UNIMPLEMENTED_MSG("Unimplemented type={}", type);
         return false;
@@ -63,6 +70,17 @@ void PutValue(std::span<u8> buffer, const T& t) {
     std::memcpy(buffer.data(), &t, (std::min)(sizeof(T), buffer.size()));
 }
 
+/// [OpenPak] The address a guest is handed is a 16-byte sockaddr_in, and 16 is the length that
+/// goes back with it: not the 256 bytes of storage SockAddrIn carries, nor the room the guest
+/// offered (Ryujinx IClient.cs GetSockName, as Citron has it).
+void PutSockAddr(std::vector<u8>& buffer, const SockAddrIn& addr) {
+    constexpr size_t guest_sockaddr_size = 16;
+    if (buffer.size() > guest_sockaddr_size) {
+        buffer.resize(guest_sockaddr_size);
+    }
+    PutValue(buffer, addr);
+}
+
 } // Anonymous namespace
 
 void BSD_USA::PollWork::Execute(BSD_USA* bsd) {
@@ -72,6 +90,28 @@ void BSD_USA::PollWork::Execute(BSD_USA* bsd) {
 void BSD_USA::PollWork::Response(HLERequestContext& ctx) {
     if (write_buffer.size() > 0) {
         ctx.WriteBuffer(write_buffer);
+    }
+
+    IPC::ResponseBuilder rb{ctx, 4};
+    rb.Push(ResultSuccess);
+    rb.Push<s32>(ret);
+    rb.PushEnum(bsd_errno);
+}
+
+void BSD_USA::SelectWork::Execute(BSD_USA* bsd) {
+    std::tie(ret, bsd_errno) =
+        bsd->SelectImpl(nfds, timeout, read_in, write_in, error_in, read_out, write_out, error_out);
+}
+
+void BSD_USA::SelectWork::Response(HLERequestContext& ctx) {
+    if (read_out.size() > 0) {
+        ctx.WriteBuffer(read_out, 0);
+    }
+    if (write_out.size() > 0) {
+        ctx.WriteBuffer(write_out, 1);
+    }
+    if (error_out.size() > 0) {
+        ctx.WriteBuffer(error_out, 2);
     }
 
     IPC::ResponseBuilder rb{ctx, 4};
@@ -211,14 +251,32 @@ void BSD_USA::SocketExempt(HLERequestContext& ctx) {
     rb.PushEnum(bsd_errno);
 }
 
+// [OpenPak] select(), which the stub answered "nothing ready" whatever was asked (as Citron has
+// it).
 void BSD_USA::Select(HLERequestContext& ctx) {
-    LOG_DEBUG(Service, "(STUBBED) called");
+    IPC::RequestParser rp{ctx};
+    const s32 nfds = rp.Pop<s32>();
+    const s32 timeout = rp.Pop<s32>();
 
-    IPC::ResponseBuilder rb{ctx, 4};
+    LOG_DEBUG(Service, "called. nfds={} timeout={}", nfds, timeout);
 
-    rb.Push(ResultSuccess);
-    rb.Push<u32>(0); // ret
-    rb.Push<u32>(0); // bsd errno
+    const auto read_set = [&ctx](size_t index) {
+        return ctx.CanReadBuffer(index) ? ctx.ReadBuffer(index) : std::span<const u8>{};
+    };
+    const auto write_set = [&ctx](size_t index) {
+        return std::vector<u8>(ctx.CanWriteBuffer(index) ? ctx.GetWriteBufferSize(index) : 0);
+    };
+
+    ExecuteWork(ctx, SelectWork{
+                         .nfds = nfds,
+                         .timeout = timeout,
+                         .read_in = read_set(0),
+                         .write_in = read_set(1),
+                         .error_in = read_set(2),
+                         .read_out = write_set(0),
+                         .write_out = write_set(1),
+                         .error_out = write_set(2),
+                     });
 }
 
 void BSD_USA::Poll(HLERequestContext& ctx) {
@@ -672,7 +730,7 @@ void BSD_USA::SendMMsg(HLERequestContext& ctx) {
     }
     if (!IsPlain(msgs)) {
         LOG_WARNING(Service, "SendMMsg fd={} vlen={}: named or control message", fd, vlen);
-        BuildErrnoResponse(ctx, Errno::NOPROTOOPT);
+        BuildErrnoResponse(ctx, Errno::OPNOTSUPP); // as Ryujinx IClient.cs
         return;
     }
 
@@ -719,7 +777,7 @@ void BSD_USA::RecvMMsg(HLERequestContext& ctx) {
     }
     if (!IsPlain(msgs)) {
         LOG_WARNING(Service, "RecvMMsg fd={} vlen={}: named or control message", fd, vlen);
-        BuildErrnoResponse(ctx, Errno::NOPROTOOPT);
+        BuildErrnoResponse(ctx, Errno::OPNOTSUPP); // as Ryujinx IClient.cs
         return;
     }
 
@@ -891,7 +949,7 @@ void BSD_USA::Close(HLERequestContext& ctx) {
     BuildErrnoResponse(ctx, CloseImpl(fd));
 }
 
-/// @brief Only bsd:s is able to dup()
+/// @brief Only bsd:s is able to dup(); bsd:u is answered ENOENT (Ryujinx IClient.cs)
 void BSD_USA::DuplicateSocket(HLERequestContext& ctx) {
     struct InputParameters {
         s32 fd;
@@ -913,7 +971,7 @@ void BSD_USA::DuplicateSocket(HLERequestContext& ctx) {
     if (is_user) {
         rb.PushRaw(OutputParameters{
             .ret = 0,
-            .bsd_errno = Errno::INVAL,
+            .bsd_errno = Errno::NOENT,
         });
         return;
     }
@@ -995,12 +1053,49 @@ void BSD_USA::EventFd(HLERequestContext& ctx) {
     descriptor.flags = Network::FLAG_O_NONBLOCK;
 
     descriptor.event_value = std::make_shared<std::atomic<u64>>(initval);
-
+    // EventFdFlags: Semaphore = 1, NonBlocking = 4. An event fd never blocks whatever it was
+    // asked for, so only the first is kept (Ryujinx EventFileDescriptor.cs).
+    descriptor.event_semaphore = (flags & 1) != 0;
 
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(fd);
     rb.PushEnum(Errno::SUCCESS);
+}
+
+// [OpenPak] The commands below are refused rather than left unimplemented (as Citron has them).
+void BSD_USA::Open(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    BuildErrnoResponse(ctx, Errno::ACCES);
+}
+
+void BSD_USA::Ioctl(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    BuildErrnoResponse(ctx, Errno::NOTTY);
+}
+
+void BSD_USA::RegisterClientShared(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    BuildErrnoResponse(ctx, Errno::SUCCESS);
+}
+
+void BSD_USA::GetThreadCoreMask(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 5};
+    rb.Push(ResultSuccess);
+    rb.Push<u64>(0);
+    rb.Push<s32>(-1);
+    rb.PushEnum(Errno::OPNOTSUPP);
+}
+
+void BSD_USA::Unsupported(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    BuildErrnoResponse(ctx, Errno::OPNOTSUPP);
 }
 
 template <typename Work>
@@ -1010,15 +1105,6 @@ void BSD_USA::ExecuteWork(HLERequestContext& ctx, Work work) {
 }
 
 std::pair<s32, Errno> BSD_USA::SocketImpl(Domain domain, Type type, Protocol protocol) {
-    // user bsd:u has restrictions on SOCK_SEQPACKET and SOCK_RAW
-    if (is_user && (type == Type::SEQPACKET || type == Type::RAW)) {
-        if (type == Type::RAW && domain == Domain::INET && protocol == Protocol::ICMP) {
-            // fine, can use on bsd:s and bsd:u
-        } else {
-            return {-1, Errno::INVAL};
-        }
-    }
-
     // [OpenPak] 0x20000000 is SOCK_NONBLOCK, a creation flag OR'ed into the base type. It is kept,
     // not merely stripped: without it a guest polling recvfrom() makes a literal blocking host call
     // and can stall the title (as Citron has it).
@@ -1045,6 +1131,17 @@ std::pair<s32, Errno> BSD_USA::SocketImpl(Domain domain, Type type, Protocol pro
     if (type == Type::Unspecified) {
         LOG_INFO(Service, "socket type 0 -> DGRAM (base type unset by the guest)");
         type = Type::DGRAM;
+    }
+
+    // user bsd:u has restrictions on SOCK_SEQPACKET and SOCK_RAW
+    // [OpenPak] Judged on the base type, once the creation flags are off it, and refused with
+    // ENOENT (Ryujinx IClient.cs).
+    if (is_user && (type == Type::SEQPACKET || type == Type::RAW)) {
+        if (type == Type::RAW && domain == Domain::INET && protocol == Protocol::ICMP) {
+            // fine, can use on bsd:s and bsd:u
+        } else {
+            return {-1, Errno::NOENT};
+        }
     }
 
     const s32 fd = FindFreeFileDescriptorHandle();
@@ -1081,6 +1178,7 @@ std::pair<s32, Errno> BSD_USA::SocketImpl(Domain domain, Type type, Protocol pro
         return {-1, Translate(init_errno)};
     }
     descriptor.is_connection_based = IsConnectionBased(type);
+    descriptor.is_datagram = type == Type::DGRAM;
 
     if (type == Type::DGRAM) {
         // [OpenPak] Guest P2P (Pia) traffic arrives as bursts of large datagrams within
@@ -1100,6 +1198,8 @@ std::pair<s32, Errno> BSD_USA::SocketImpl(Domain domain, Type type, Protocol pro
 
     if (Settings::values.airplane_mode.GetValue() && descriptor.is_connection_based) {
         LOG_ERROR(Service, "Airplane mode is enabled, cannot create socket");
+        // [OpenPak] The refused socket gives its slot back, or each refusal costs a descriptor.
+        file_descriptors[fd].reset();
         return {-1, Errno::NOTCONN};
     }
 
@@ -1113,7 +1213,7 @@ bool BSD_USA::PollSetIncludesEventFd(std::span<const u8> read_buffer, s32 nfds) 
     std::vector<PollFD> fds(nfds);
     std::memcpy(fds.data(), read_buffer.data(), nfds * sizeof(PollFD));
     for (const PollFD& pollfd : fds) {
-        if (pollfd.fd < 0 || pollfd.fd > static_cast<s32>(MAX_FD)) {
+        if (pollfd.fd < 0 || pollfd.fd >= static_cast<s32>(MAX_FD)) {
             continue;
         }
         const auto& descriptor = file_descriptors[pollfd.fd];
@@ -1126,6 +1226,13 @@ bool BSD_USA::PollSetIncludesEventFd(std::span<const u8> read_buffer, s32 nfds) 
 
 std::pair<s32, Errno> BSD_USA::PollImpl(std::vector<u8>& write_buffer, std::span<const u8> read_buffer,
                                     s32 nfds, s32 timeout) {
+    if (nfds == 0 && timeout >= 0) {
+        // [OpenPak] poll(NULL, 0, timeout) is how a title sleeps between retries. Answered at
+        // once, its retry budget is spent in microseconds (as Citron has it; Ryujinx IClient.cs
+        // sleeps the thread the same way).
+        std::this_thread::sleep_for(std::chrono::milliseconds(timeout));
+        return {0, Errno::SUCCESS};
+    }
     if (nfds <= 0) {
         // When no entries are provided, -1 is returned with errno zero
         return {-1, Errno::SUCCESS};
@@ -1154,20 +1261,35 @@ std::pair<s32, Errno> BSD_USA::PollImpl(std::vector<u8>& write_buffer, std::span
         return {-1, Errno::INVAL};
     }
 
-    for (PollFD& pollfd : fds) {
-        ASSERT(False(pollfd.revents));
+    // [OpenPak] A dead descriptor -- out of range, never opened, or closed -- used to end the
+    // whole poll with nothing reported, whatever else in the set was ready. poll() marks that
+    // one entry POLLNVAL, counts it as ready, and still evaluates the rest (as Citron has it).
+    // Counting it is also what keeps a poll holding one from waiting for ever.
+    std::vector<bool> is_dead(fds.size(), false);
+    bool any_dead = false;
+    bool has_event_fd = false;
 
-        if (pollfd.fd > static_cast<s32>(MAX_FD) || pollfd.fd < 0) {
+    for (size_t i = 0; i < fds.size(); ++i) {
+        PollFD& pollfd = fds[i];
+        pollfd.revents = PollEvents{};
+
+        if (pollfd.fd >= static_cast<s32>(MAX_FD) || pollfd.fd < 0) {
             LOG_ERROR(Service, "File descriptor handle={} is invalid", pollfd.fd);
-            pollfd.revents = PollEvents{};
-            return {0, Errno::SUCCESS};
+            is_dead[i] = true;
+            any_dead = true;
+            continue;
         }
 
         const std::optional<FileDescriptor>& descriptor = file_descriptors[pollfd.fd];
-        if (!descriptor) {
+        if (!descriptor || !descriptor->socket) {
             LOG_TRACE(Service, "File descriptor handle={} is not allocated", pollfd.fd);
-            pollfd.revents = PollEvents::Nval;
-            return {0, Errno::SUCCESS};
+            is_dead[i] = true;
+            any_dead = true;
+            continue;
+        }
+
+        if (descriptor->event_value) {
+            has_event_fd = true;
         }
     }
 
@@ -1177,16 +1299,6 @@ std::pair<s32, Errno> BSD_USA::PollImpl(std::vector<u8>& write_buffer, std::span
             asked += fmt::format(" {}:{:#x}", pollfd.fd, static_cast<u16>(pollfd.events));
         }
         LOG_DEBUG(Service, "Poll asking{} timeout={}", asked, timeout);
-        // [OpenPak] The NPLN SDK re-verifies the returned array against a mask cached in its
-        // TLS; a round-trip that alters the bytes makes it take its error path and stall.
-        // Log the returned array verbatim so a freeze can be compared against the request.
-        std::string returned;
-        for (const PollFD& pollfd : fds) {
-            returned += fmt::format(" fd={} e={:#x} r={:#x} |", pollfd.fd,
-                                    static_cast<u16>(pollfd.events),
-                                    static_cast<u16>(pollfd.revents));
-        }
-        LOG_DEBUG(Service, "Poll answered:{} (timeout={})", returned, timeout);
     }
 
     // [OpenPak] An event fd is answered from its counter, never from the host. It used to carry
@@ -1197,10 +1309,14 @@ std::pair<s32, Errno> BSD_USA::PollImpl(std::vector<u8>& write_buffer, std::span
     // queued work and never wrote it: gRPC kicks its poller this way, which is why NPLN sat on
     // an established connection without ever opening a stream. The counter is the whole truth.
     std::vector<Network::PollFD> host_pollfds;
-    std::vector<size_t> host_of(fds.size(), std::numeric_limits<size_t>::max());
+    std::vector<size_t> host_of(fds.size(), (std::numeric_limits<size_t>::max)());
     s32 events_ready = 0;
 
     for (size_t i = 0; i < fds.size(); ++i) {
+        if (is_dead[i]) {
+            continue;
+        }
+
         const FileDescriptor& descriptor = *file_descriptors[fds[i].fd];
 
         if (descriptor.event_value) {
@@ -1222,33 +1338,51 @@ std::pair<s32, Errno> BSD_USA::PollImpl(std::vector<u8>& write_buffer, std::span
 
         host_of[i] = host_pollfds.size();
 
+        // [OpenPak] A zero mask on a socket asks for nothing but errors, and that is what the
+        // host is asked: it answers such an entry with ERR or HUP and nothing else.
         Network::PollFD& host = host_pollfds.emplace_back();
         host.socket = descriptor.socket.get();
         host.events = Translate(fds[i].events);
-        // [OpenPak] A zero-mask poll entry is still answered when the descriptor has activity:
-        // the title's gRPC stack parks a poll of [wakeup eventfd: In, channel socket: 0] and
-        // relies on the socket's readiness surfacing through that same wait. Linux poll() with
-        // events=0 only ever reports ERR/HUP, so ask the host for In|Out and gate the reported
-        // revents back to the guest by what it actually has.
-        if (host.events == Network::PollEvents{}) {
-            host.events = Network::PollEvents::In | Network::PollEvents::Out;
-        }
         host.revents = Network::PollEvents{};
     }
 
-    // [OpenPak] A poll that was asked to wait forever waits forever. It is served in slices only
-    // so that shutdown stays responsive -- the slice is never reported to the guest as a result.
-    // Answering "nothing ready" to a caller that asked for -1 is a lie poll(2) never tells, and a
-    // gRPC title believes it: the transport treats the wakeup as spurious, leaves its queued work
-    // queued, and the connection sits established without ever opening a stream.
+    // [OpenPak] With an event fd in the set, a poll that was asked to wait forever is served in
+    // slices, so its counter is looked at again -- the slice is never reported to the guest as
+    // a result. This is the path taken only when the poll could not be deferred.
     constexpr s32 InfinitePollSliceMs = 250;
+
+    // [OpenPak] Without one, the wait is the guest's own -- but while a datagram socket is open
+    // it is cut to a few milliseconds, because the thread this poll holds is one the datagram
+    // transport needs back. Nothing ready by then is answered as nothing ready: 0, no error
+    // (Ryujinx IClient.cs, ConcurrentUdpPollSliceMs).
+    constexpr s32 ConcurrentUdpPollSliceMs = 5;
+
+    s32 host_timeout = timeout;
+    if (events_ready > 0 || any_dead) {
+        host_timeout = 0;
+    } else if (has_event_fd) {
+        host_timeout = timeout < 0 ? InfinitePollSliceMs : timeout;
+    } else if (timeout == -1 || timeout > ConcurrentUdpPollSliceMs) {
+        const bool has_datagram_socket =
+            std::any_of(file_descriptors.begin(), file_descriptors.end(),
+                        [](const std::optional<FileDescriptor>& descriptor) {
+                            return descriptor && descriptor->is_datagram;
+                        });
+        if (has_datagram_socket) {
+            host_timeout = ConcurrentUdpPollSliceMs;
+        }
+    }
 
     // Re-read the event fd counters. They are answered from the counter rather than by the host,
     // so a wait that only re-polls the host descriptors would never notice one being signalled --
     // and the eventfd is precisely how a gRPC poller is woken.
-    const auto recheck_events = [&fds, &events_ready]() {
+    const auto recheck_events = [&fds, &is_dead, &events_ready]() {
         events_ready = 0;
-        for (PollFD& pollfd : fds) {
+        for (size_t i = 0; i < fds.size(); ++i) {
+            if (is_dead[i]) {
+                continue;
+            }
+            PollFD& pollfd = fds[i];
             const FileDescriptor& descriptor = *file_descriptors[pollfd.fd];
             if (!descriptor.event_value) {
                 continue;
@@ -1263,9 +1397,9 @@ std::pair<s32, Errno> BSD_USA::PollImpl(std::vector<u8>& write_buffer, std::span
         }
     };
 
-    auto result = Network::Poll(host_pollfds, events_ready > 0 ? 0 : (timeout < 0 ? InfinitePollSliceMs : timeout));
+    const auto result = Network::Poll(host_pollfds, host_timeout);
 
-    if (timeout < 0 && events_ready == 0 && result.first == 0) {
+    if (has_event_fd && timeout < 0 && events_ready == 0 && result.first == 0) {
         recheck_events();
     }
 
@@ -1274,17 +1408,21 @@ std::pair<s32, Errno> BSD_USA::PollImpl(std::vector<u8>& write_buffer, std::span
     // for a gRPC transport is the queued RPC. Answered as plain success with no events it reads
     // as a spurious wakeup instead, the queue is left alone, and the connection sits established
     // without ever opening a stream. Ryujinx answers ETIMEDOUT here and the same title works.
-    bool timed_out_waiting = false;
-    if (timeout < 0 && events_ready == 0 && result.first == 0 &&
-        result.second == Network::Errno::SUCCESS) {
-        timed_out_waiting = true;
-    }
+    const bool timed_out_waiting = has_event_fd && !any_dead && timeout < 0 && events_ready == 0 &&
+                                   result.first == 0 && result.second == Network::Errno::SUCCESS;
 
+    s32 ready = 0;
     for (size_t i = 0; i < fds.size(); ++i) {
-        if (host_of[i] != std::numeric_limits<size_t>::max()) {
+        if (is_dead[i]) {
+            fds[i].revents = PollEvents::Nval;
+        } else if (host_of[i] != (std::numeric_limits<size_t>::max)()) {
             fds[i].revents = Translate(host_pollfds[host_of[i]].revents);
+            if (fds[i].events == PollEvents{}) {
+                fds[i].revents &= PollEvents::Err | PollEvents::Hup;
+            }
         }
         if (True(fds[i].revents)) {
+            ++ready;
             LOG_DEBUG(Service, "Poll fd={} events={:#x} -> revents={:#x}", fds[i].fd,
                       static_cast<u16>(fds[i].events), static_cast<u16>(fds[i].revents));
         } else {
@@ -1294,19 +1432,168 @@ std::pair<s32, Errno> BSD_USA::PollImpl(std::vector<u8>& write_buffer, std::span
     }
     std::memcpy(write_buffer.data(), fds.data(), nfds * sizeof(PollFD));
 
-    auto [ready, bsd_errno] = Translate(result);
+    // Event fds and dead descriptors were answered here, not by the host, so a poll that found
+    // one is a success however the host poll of the rest turned out.
+    if (events_ready > 0 || any_dead) {
+        return {ready, Errno::SUCCESS};
+    }
+    if (result.second != Network::Errno::SUCCESS) {
+        return Translate(result);
+    }
+    if (timed_out_waiting) {
+        return {0, Errno::TIMEDOUT};
+    }
+    return {ready, Errno::SUCCESS};
+}
 
-    // Event fds were answered here, not by the host, so they count here too -- and a poll that
-    // found one is a success however the host poll of the rest turned out.
-    if (events_ready > 0) {
-        ready = (ready > 0 ? ready : 0) + events_ready;
-        bsd_errno = Errno::SUCCESS;
-    } else if (timed_out_waiting) {
-        ready = 0;
-        bsd_errno = Errno::TIMEDOUT;
+namespace {
+
+// fd_set is a plain byte array, bit i (LSB-first within each byte) == fd i.
+void ExtractFdsFromMask(std::span<const u8> mask, std::vector<s32>& out) {
+    for (size_t byte_idx = 0; byte_idx < mask.size(); ++byte_idx) {
+        const u8 current = mask[byte_idx];
+        for (int bit = 0; bit < 8; ++bit) {
+            if (current & (1u << bit)) {
+                out.push_back(static_cast<s32>(byte_idx * 8 + bit));
+            }
+        }
+    }
+}
+
+void SetFdInMask(std::vector<u8>& mask, s32 fd) {
+    const size_t byte_idx = static_cast<size_t>(fd) / 8;
+    if (byte_idx < mask.size()) {
+        mask[byte_idx] |= static_cast<u8>(1u << (fd % 8));
+    }
+}
+
+} // Anonymous namespace
+
+// [OpenPak] select() over poll() (as Citron has it). An event fd is answered from its counter,
+// as in PollImpl, because the host has nothing to say about one.
+std::pair<s32, Errno> BSD_USA::SelectImpl(s32 nfds, s32 timeout, std::span<const u8> read_in,
+                                          std::span<const u8> write_in,
+                                          std::span<const u8> error_in, std::vector<u8>& read_out,
+                                          std::vector<u8>& write_out,
+                                          std::vector<u8>& error_out) {
+    std::fill(read_out.begin(), read_out.end(), u8{0});
+    std::fill(write_out.begin(), write_out.end(), u8{0});
+    std::fill(error_out.begin(), error_out.end(), u8{0});
+
+    std::vector<s32> read_fds;
+    std::vector<s32> write_fds;
+    std::vector<s32> error_fds;
+    ExtractFdsFromMask(read_in, read_fds);
+    ExtractFdsFromMask(write_in, write_fds);
+    ExtractFdsFromMask(error_in, error_fds);
+
+    if (nfds <= 0 || (read_fds.empty() && write_fds.empty() && error_fds.empty())) {
+        return {0, Errno::SUCCESS};
     }
 
-    return {ready, bsd_errno};
+    // One poll entry per unique fd, requesting whichever of In/Out it was asked about.
+    // Err/Hup/Nval come back from the host poll() unconditionally, regardless of what
+    // was requested, matching POSIX poll() semantics.
+    struct Entry {
+        s32 fd;
+        Network::PollEvents requested{};
+    };
+    std::vector<Entry> entries;
+    const auto add = [&entries](const std::vector<s32>& fds, Network::PollEvents event) {
+        for (const s32 fd : fds) {
+            const auto it = std::find_if(entries.begin(), entries.end(),
+                                         [fd](const Entry& e) { return e.fd == fd; });
+            if (it != entries.end()) {
+                it->requested |= event;
+            } else {
+                entries.push_back({fd, event});
+            }
+        }
+    };
+    add(read_fds, Network::PollEvents::In);
+    add(write_fds, Network::PollEvents::Out);
+
+    std::vector<s32> polled_fds;
+    std::vector<Network::PollFD> host_pollfds;
+    std::vector<s32> event_fds;
+    polled_fds.reserve(entries.size());
+    host_pollfds.reserve(entries.size());
+    for (const Entry& entry : entries) {
+        if (entry.fd < 0 || entry.fd >= static_cast<s32>(MAX_FD) || !file_descriptors[entry.fd] ||
+            !file_descriptors[entry.fd]->socket) {
+            continue;
+        }
+        if (file_descriptors[entry.fd]->event_value) {
+            if (True(entry.requested & Network::PollEvents::In)) {
+                event_fds.push_back(entry.fd);
+            }
+            continue;
+        }
+        polled_fds.push_back(entry.fd);
+        host_pollfds.push_back(Network::PollFD{
+            .socket = file_descriptors[entry.fd]->socket.get(),
+            .events = entry.requested,
+            .revents = Network::PollEvents{},
+        });
+    }
+
+    const auto any_event_ready = [&event_fds]() {
+        return std::any_of(event_fds.begin(), event_fds.end(), [](s32 fd) {
+            return file_descriptors[fd]->event_value->load() > 0;
+        });
+    };
+
+    // The host cannot see an event fd being written, so a wait with one in the set is a bounded
+    // one, and the counters are read again after it.
+    constexpr s32 EventFdSelectSliceMs = 250;
+    s32 host_timeout = timeout;
+    if (any_event_ready()) {
+        host_timeout = 0;
+    } else if (!event_fds.empty() && (timeout < 0 || timeout > EventFdSelectSliceMs)) {
+        host_timeout = EventFdSelectSliceMs;
+    }
+
+    const auto [poll_ret, poll_errno] = Translate(Network::Poll(host_pollfds, host_timeout));
+    if (poll_errno != Errno::SUCCESS) {
+        return {poll_ret, poll_errno};
+    }
+
+    s32 ready = 0;
+    for (const s32 fd : event_fds) {
+        if (file_descriptors[fd]->event_value->load() > 0) {
+            SetFdInMask(read_out, fd);
+            ++ready;
+        }
+    }
+
+    // error_fds only ever reports out-of-band/exceptional conditions; a plain closed/errored
+    // socket surfaces through the read or write set it was asked about, same as real select().
+    constexpr auto err_like =
+        Network::PollEvents::Err | Network::PollEvents::Hup | Network::PollEvents::Nval;
+    for (size_t i = 0; i < host_pollfds.size(); ++i) {
+        const s32 fd = polled_fds[i];
+        const Network::PollEvents revents = host_pollfds[i].revents;
+        bool counted = false;
+        if (True(host_pollfds[i].events & Network::PollEvents::In) &&
+            True(revents & (Network::PollEvents::In | err_like))) {
+            SetFdInMask(read_out, fd);
+            counted = true;
+        }
+        if (True(host_pollfds[i].events & Network::PollEvents::Out) &&
+            True(revents & (Network::PollEvents::Out | err_like))) {
+            SetFdInMask(write_out, fd);
+            counted = true;
+        }
+        if (True(revents & (Network::PollEvents::Err | Network::PollEvents::Hup))) {
+            SetFdInMask(error_out, fd);
+            counted = true;
+        }
+        if (counted) {
+            ++ready;
+        }
+    }
+
+    return {ready, Errno::SUCCESS};
 }
 
 std::pair<s32, Errno> BSD_USA::AcceptImpl(s32 fd, std::vector<u8>& write_buffer) {
@@ -1332,7 +1619,7 @@ std::pair<s32, Errno> BSD_USA::AcceptImpl(s32 fd, std::vector<u8>& write_buffer)
     new_descriptor.is_connection_based = descriptor.is_connection_based;
 
     const SockAddrIn guest_addr_in = Translate(result.sockaddr_in);
-    PutValue(write_buffer, guest_addr_in);
+    PutSockAddr(write_buffer, guest_addr_in);
 
     return {new_fd, Errno::SUCCESS};
 }
@@ -1348,8 +1635,16 @@ Errno BSD_USA::BindImpl(s32 fd, std::span<const u8> addr) {
     }
 
     auto addr_in = GetValue<SockAddrIn>(addr);
+    const Network::SockAddrIn host_addr = Translate(addr_in);
 
-    return Translate(file_descriptors[fd]->socket->Bind(Translate(addr_in)));
+    // [OpenPak] Titles rebind one fixed source port across retries. Without reuse the second
+    // bind fails while the first socket is still being torn down, and the retry dies of
+    // EADDRINUSE before it sends anything. Best effort (Ryujinx ManagedSocket.cs Bind).
+    if (file_descriptors[fd]->is_datagram && host_addr.portno != 0) {
+        void(file_descriptors[fd]->socket->SetReuseAddr(true));
+    }
+
+    return Translate(file_descriptors[fd]->socket->Bind(host_addr));
 }
 
 /// [OpenPak] Whether this address is the OpenPak server itself: the address every redirected
@@ -1495,9 +1790,7 @@ Errno BSD_USA::GetPeerNameImpl(s32 fd, std::vector<u8>& write_buffer) {
     }
     const SockAddrIn guest_addrin = Translate(addr_in);
 
-    ASSERT(write_buffer.size() >= sizeof(guest_addrin));
-    write_buffer.resize(sizeof(guest_addrin));
-    PutValue(write_buffer, guest_addrin);
+    PutSockAddr(write_buffer, guest_addrin);
     return Translate(bsd_errno);
 }
 
@@ -1517,9 +1810,7 @@ Errno BSD_USA::GetSockNameImpl(s32 fd, std::vector<u8>& write_buffer) {
     }
     const SockAddrIn guest_addrin = Translate(addr_in);
 
-    ASSERT(write_buffer.size() >= sizeof(guest_addrin));
-    write_buffer.resize(sizeof(guest_addrin));
-    PutValue(write_buffer, guest_addrin);
+    PutSockAddr(write_buffer, guest_addrin);
     return Translate(bsd_errno);
 }
 
@@ -1547,7 +1838,7 @@ std::pair<s32, Errno> BSD_USA::FcntlImpl(s32 fd, FcntlCmd cmd, s32 arg) {
 
     switch (cmd) {
     case FcntlCmd::GETFL:
-        ASSERT(arg == 0);
+        // [OpenPak] F_GETFL ignores its argument, and titles pass one (as Citron has it).
         return {descriptor.flags, Errno::SUCCESS};
     case FcntlCmd::SETFL: {
         const bool enable = (arg & Network::FLAG_O_NONBLOCK) != 0;
@@ -1655,9 +1946,9 @@ Errno BSD_USA::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8
         auto [pending_err, getsockopt_err] = socket->GetPendingError();
         if (getsockopt_err == Network::Errno::SUCCESS) {
             Errno translated_pending_err = Translate(pending_err);
-            ASSERT_OR_EXECUTE_MSG(
-                optval.size() == sizeof(Errno), { return Errno::INVAL; },
-                "Incorrect getsockopt option size");
+            if (optval.size() < sizeof(Errno)) {
+                return Errno::INVAL;
+            }
             optval.resize(sizeof(Errno));
             PutValue(optval, translated_pending_err);
 
@@ -1698,11 +1989,16 @@ Errno BSD_USA::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<cons
         return Errno::BADF;
     }
 
+    // [OpenPak] The guest's value and its length are never asserted on: four bytes or more are
+    // read as an int, fewer as the first byte, and none at all is EINVAL (Ryujinx
+    // ManagedSocket.cs SetSocketOption).
+    if (optval.empty()) {
+        return Errno::INVAL;
+    }
+    const u32 value = optval.size() >= sizeof(u32) ? GetValue<u32>(optval) : u32{optval[0]};
+
     if (level == static_cast<u32>(SocketLevel::TCP) && static_cast<u32>(optname) == 1) {
-        if (optval.size() < sizeof(u32)) {
-            return Errno::INVAL;
-        }
-        return Translate(file_descriptors[fd]->socket->SetNoDelay(GetValue<u32>(optval) != 0));
+        return Translate(file_descriptors[fd]->socket->SetNoDelay(value != 0));
     }
 
     if (level != static_cast<u32>(SocketLevel::SOCKET)) {
@@ -1739,25 +2035,19 @@ Errno BSD_USA::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<cons
     }
 
     if (optname == OptName::LINGER) {
-        ASSERT(optval.size() == sizeof(Linger));
-        auto linger = GetValue<Linger>(optval);
-        ASSERT(linger.onoff == 0 || linger.onoff == 1);
+        // The second field is the linger time, when the guest sent one.
+        const u32 linger_time =
+            optval.size() >= sizeof(Linger) ? GetValue<u32>(optval.subspan(sizeof(u32))) : u32{0};
 
-        return Translate(socket->SetLinger(linger.onoff != 0, linger.linger));
+        return Translate(socket->SetLinger(value != 0, linger_time));
     }
-
-    ASSERT(optval.size() == sizeof(u32));
-    auto value = GetValue<u32>(optval);
 
     switch (optname) {
     case OptName::REUSEADDR:
-        ASSERT(value == 0 || value == 1);
         return Translate(socket->SetReuseAddr(value != 0));
     case OptName::KEEPALIVE:
-        ASSERT(value == 0 || value == 1);
         return Translate(socket->SetKeepAlive(value != 0));
     case OptName::BROADCAST:
-        ASSERT(value == 0 || value == 1);
         return Translate(socket->SetBroadcast(value != 0));
     case OptName::SNDBUF:
         return Translate(socket->SetSndBuf(value));
@@ -1806,16 +2096,27 @@ std::pair<s32, Errno> BSD_USA::RecvImpl(s32 fd, u32 flags, std::vector<u8>& mess
 
     FileDescriptor& descriptor = *file_descriptors[fd];
 
-    // [OpenPak] An event fd answers with its count and clears it, in one read.
+    // [OpenPak] An event fd answers with its count and clears it, in one read; a semaphore one
+    // answers 1 and takes one off. The buffer is judged first, so a read too short to carry the
+    // count does not consume it (Ryujinx EventFileDescriptor.cs).
     if (descriptor.event_value) {
-        const u64 value = descriptor.event_value->exchange(0);
+        if (message.size() < sizeof(u64)) {
+            return {-1, Errno::INVAL};
+        }
+
+        u64 value = 0;
+        if (descriptor.event_semaphore) {
+            u64 current = descriptor.event_value->load();
+            while (current != 0 &&
+                   !descriptor.event_value->compare_exchange_weak(current, current - 1)) {
+            }
+            value = current != 0 ? 1 : 0;
+        } else {
+            value = descriptor.event_value->exchange(0);
+        }
 
         if (value == 0) {
             return {-1, Errno::AGAIN};
-        }
-
-        if (message.size() < sizeof(u64)) {
-            return {-1, Errno::INVAL};
         }
 
         std::memcpy(message.data(), &value, sizeof(value));
@@ -1914,9 +2215,8 @@ std::pair<s32, Errno> BSD_USA::RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& 
         if (ret < 0) {
             addr.clear();
         } else {
-            ASSERT(addr.size() >= 16);
             const SockAddrIn result = Translate(addr_in);
-            PutValue(addr, result);
+            PutSockAddr(addr, result);
         }
     }
 
@@ -1936,6 +2236,11 @@ std::pair<s32, Errno> BSD_USA::SendImpl(s32 fd, u32 flags, std::span<const u8> m
 
         u64 value{};
         std::memcpy(&value, message.data(), sizeof(value));
+
+        // The one count an event fd cannot hold (Ryujinx EventFileDescriptor.cs).
+        if (value == (std::numeric_limits<u64>::max)()) {
+            return {-1, Errno::INVAL};
+        }
 
         const u64 previous = file_descriptors[fd]->event_value->fetch_add(value);
 
@@ -1998,6 +2303,19 @@ Errno BSD_USA::CloseImpl(s32 fd) {
         return Errno::BADF;
     }
 
+    // [OpenPak] A duplicate shares its host socket with the descriptor it was made from (ssl
+    // duplicates the one a connection is given), so the host socket goes only with the last of
+    // them, as Ryujinx counts references (BsdContext.cs). Closed with the first, a TLS connection
+    // going away took the title's own socket with it.
+    const auto shared = std::ranges::any_of(file_descriptors, [&](const auto& other) {
+        return other && &other != &file_descriptors[fd] &&
+               other->socket == file_descriptors[fd]->socket;
+    });
+    if (shared) {
+        file_descriptors[fd].reset();
+        return Errno::SUCCESS;
+    }
+
     const Errno bsd_errno = Translate(file_descriptors[fd]->socket->Close());
     if (bsd_errno != Errno::SUCCESS) {
         return bsd_errno;
@@ -2020,11 +2338,9 @@ std::variant<s32, Errno> BSD_USA::DuplicateSocketImpl(s32 fd) {
         return Errno::MFILE;
     }
 
-    file_descriptors[new_fd] = FileDescriptor{
-        .socket = file_descriptors[fd]->socket,
-        .flags = file_descriptors[fd]->flags,
-        .is_connection_based = file_descriptors[fd]->is_connection_based,
-    };
+    // [OpenPak] The whole descriptor, so a duplicated event fd shares its counter and a
+    // duplicated socket the options it was set (as Citron has it).
+    file_descriptors[new_fd] = file_descriptors[fd];
     return new_fd;
 }
 
@@ -2087,7 +2403,7 @@ bool BSD_USA::DeferBlockingReceive(HLERequestContext& ctx, s32 fd, u32 flags) {
 }
 
 bool BSD_USA::IsFileDescriptorValid(s32 fd) const noexcept {
-    if (fd > static_cast<s32>(MAX_FD) || fd < 0) {
+    if (fd >= static_cast<s32>(MAX_FD) || fd < 0) {
         LOG_ERROR(Service, "Invalid file descriptor handle={}", fd);
         return false;
     }
@@ -2125,7 +2441,7 @@ BSD_USA::BSD_USA(Core::System& system_, const char* name, bool is_user_)
         {1, &BSD_USA::StartMonitoring, "StartMonitoring"},
         {2, &BSD_USA::Socket, "Socket"},
         {3, &BSD_USA::SocketExempt, "SocketExempt"},
-        {4, nullptr, "Open"},
+        {4, &BSD_USA::Open, "Open"},
         {5, &BSD_USA::Select, "Select"},
         {6, &BSD_USA::Poll, "Poll"},
         {7, &BSD_USA::Sysctl, "Sysctl"},
@@ -2140,33 +2456,33 @@ BSD_USA::BSD_USA(Core::System& system_, const char* name, bool is_user_)
         {16, &BSD_USA::GetSockName, "GetSockName"},
         {17, &BSD_USA::GetSockOpt, "GetSockOpt"},
         {18, &BSD_USA::Listen, "Listen"},
-        {19, nullptr, "Ioctl"},
+        {19, &BSD_USA::Ioctl, "Ioctl"},
         {20, &BSD_USA::Fcntl, "Fcntl"},
         {21, &BSD_USA::SetSockOpt, "SetSockOpt"},
         {22, &BSD_USA::Shutdown, "Shutdown"},
-        {23, nullptr, "ShutdownAllSockets"},
+        {23, &BSD_USA::Unsupported, "ShutdownAllSockets"},
         {24, &BSD_USA::Write, "Write"},
         {25, &BSD_USA::Read, "Read"},
         {26, &BSD_USA::Close, "Close"},
         {27, &BSD_USA::DuplicateSocket, "DuplicateSocket"},
-        {28, nullptr, "GetResourceStatistics"},
+        {28, &BSD_USA::Unsupported, "GetResourceStatistics"},
         {29, &BSD_USA::RecvMMsg, "RecvMMsg"}, //3.0.0+
         {30, &BSD_USA::SendMMsg, "SendMMsg"}, //3.0.0+
         {31, &BSD_USA::EventFd, "EventFd"}, //7.0.0+
-        {32, nullptr, "RegisterResourceStatisticsName"}, //7.0.0+
-        {33, nullptr, "RegisterClientShared"}, //10.0.0+
-        {34, nullptr, "GetSocketStatistics"}, //15.0.0+
-        {35, nullptr, "NifIoctl"}, //17.0.0+
-        {36, nullptr, "Unknown36"}, //18.0.0+
-        {37, nullptr, "Unknown37"}, //18.0.0+
-        {38, nullptr, "Unknown38"}, //18.0.0+
-        {39, nullptr, "Unknown39"}, //20.0.0+
-        {40, nullptr, "Unknown40"}, //20.0.0+
+        {32, &BSD_USA::Unsupported, "RegisterResourceStatisticsName"}, //7.0.0+
+        {33, &BSD_USA::RegisterClientShared, "RegisterClientShared"}, //10.0.0+
+        {34, &BSD_USA::Unsupported, "GetSocketStatistics"}, //15.0.0+
+        {35, &BSD_USA::Ioctl, "NifIoctl"}, //17.0.0+
+        {36, &BSD_USA::Unsupported, "Unknown36"}, //18.0.0+
+        {37, &BSD_USA::Unsupported, "Unknown37"}, //18.0.0+
+        {38, &BSD_USA::Unsupported, "Unknown38"}, //18.0.0+
+        {39, &BSD_USA::Unsupported, "Unknown39"}, //20.0.0+
+        {40, &BSD_USA::Unsupported, "Unknown40"}, //20.0.0+
         {41, nullptr, "Unknown41"}, //21.0.0+
         {42, nullptr, "Unknown42"}, //21.0.0+
         {43, nullptr, "Unknown43"}, //21.0.0+
-        {200, nullptr, "SetThreadCoreMask"}, //15.0.0+
-        {201, nullptr, "GetThreadCoreMask"}, //15.0.0+
+        {200, &BSD_USA::Unsupported, "SetThreadCoreMask"}, //15.0.0+
+        {201, &BSD_USA::GetThreadCoreMask, "GetThreadCoreMask"}, //15.0.0+
     };
     // clang-format on
 
@@ -2194,22 +2510,22 @@ BSDCFG::BSDCFG(Core::System& system_, const char *name)
     : ServiceFramework{system_, name} {
     // clang-format off
     static const FunctionInfo functions[] = {
-        {0, nullptr, "SetIfUp"},
-        {1, nullptr, "SetIfUpWithEvent"},
-        {2, nullptr, "CancelIf"},
-        {3, nullptr, "SetIfDown"},
-        {4, nullptr, "GetIfState"},
-        {5, nullptr, "DhcpRenew"},
-        {6, nullptr, "AddStaticArpEntry"},
-        {7, nullptr, "RemoveArpEntry"},
-        {8, nullptr, "LookupArpEntry"},
-        {9, nullptr, "LookupArpEntry2"},
-        {10, nullptr, "ClearArpEntries"},
-        {11, nullptr, "ClearArpEntries2"},
-        {12, nullptr, "PrintArpEntries"},
-        {13, nullptr, "Unknown13"},
-        {14, nullptr, "Unknown14"},
-        {15, nullptr, "Unknown15"},
+        {0, &BSDCFG::Unsupported, "SetIfUp"},
+        {1, &BSDCFG::Unsupported, "SetIfUpWithEvent"},
+        {2, &BSDCFG::Unsupported, "CancelIf"},
+        {3, &BSDCFG::Unsupported, "SetIfDown"},
+        {4, &BSDCFG::Unsupported, "GetIfState"},
+        {5, &BSDCFG::Unsupported, "DhcpRenew"},
+        {6, &BSDCFG::Unsupported, "AddStaticArpEntry"},
+        {7, &BSDCFG::Unsupported, "RemoveArpEntry"},
+        {8, &BSDCFG::Unsupported, "LookupArpEntry"},
+        {9, &BSDCFG::Unsupported, "LookupArpEntry2"},
+        {10, &BSDCFG::Unsupported, "ClearArpEntries"},
+        {11, &BSDCFG::Unsupported, "ClearArpEntries2"},
+        {12, &BSDCFG::Unsupported, "PrintArpEntries"},
+        {13, &BSDCFG::Unsupported, "Unknown13"},
+        {14, &BSDCFG::Unsupported, "Unknown14"},
+        {15, &BSDCFG::Unsupported, "Unknown15"},
     };
     // clang-format on
 
@@ -2217,6 +2533,16 @@ BSDCFG::BSDCFG(Core::System& system_, const char *name)
 }
 
 BSDCFG::~BSDCFG() = default;
+
+// [OpenPak] Every bsdcfg command is refused rather than left unimplemented (as Citron has it).
+void BSDCFG::Unsupported(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 4};
+    rb.Push(ResultSuccess);
+    rb.Push<s32>(-1);
+    rb.PushEnum(Errno::OPNOTSUPP);
+}
 
 BSD_NU::BSD_NU(Core::System& system_)
     : ServiceFramework{system_, "bsd:nu"} {
