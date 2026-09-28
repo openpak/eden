@@ -1,4 +1,3 @@
-#include <cstdlib>
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -369,9 +368,7 @@ HaltReason ArmDynarmic64::RunThread(Kernel::KThread* thread) {
 }
 
 HaltReason ArmDynarmic64::StepThread(Kernel::KThread* thread) {
-    if (std::getenv("OPENPAK_TRACE_GUEST_FAULT") == nullptr) {
-        m_jit->ClearExclusiveState();
-    }
+    m_jit->ClearExclusiveState();
     return TranslateHaltReason(m_jit->Step());
 }
 
