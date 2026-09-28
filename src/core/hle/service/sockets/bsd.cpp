@@ -1019,8 +1019,10 @@ std::pair<s32, Errno> BSD_USA::SocketImpl(Domain domain, Type type, Protocol pro
         }
     }
 
-    [[maybe_unused]] const bool unk_flag = (static_cast<u32>(type) & 0x20000000) != 0;
-    UNIMPLEMENTED_IF_MSG(unk_flag, "Unknown flag in type");
+    // [OpenPak] 0x20000000 is SOCK_NONBLOCK, a creation flag OR'ed into the base type. It is kept,
+    // not merely stripped: without it a guest polling recvfrom() makes a literal blocking host call
+    // and can stall the title (as Citron has it).
+    const bool socket_nonblock = (static_cast<u32>(type) & 0x20000000) != 0;
     type = static_cast<Type>(static_cast<u32>(type) & ~0x20000000);
 
     // [OpenPak] SOCK_CLOEXEC was never stripped here, so a guest that set it handed Translate() a
@@ -1079,6 +1081,22 @@ std::pair<s32, Errno> BSD_USA::SocketImpl(Domain domain, Type type, Protocol pro
         return {-1, Translate(init_errno)};
     }
     descriptor.is_connection_based = IsConnectionBased(type);
+
+    if (type == Type::DGRAM) {
+        // [OpenPak] Guest P2P (Pia) traffic arrives as bursts of large datagrams within
+        // milliseconds of each other, and the host's default receive buffer can overflow before the
+        // guest's poll loop drains it, dropping datagrams with no trace on either side. A generous
+        // buffer only widens headroom (as Citron has it).
+        void(descriptor.socket->SetRcvBuf(1024 * 1024));
+    }
+    if (socket_nonblock) {
+        const auto nonblock_errno = descriptor.socket->SetNonBlock(true);
+        if (nonblock_errno != Network::Errno::SUCCESS) {
+            file_descriptors[fd].reset();
+            return {-1, Translate(nonblock_errno)};
+        }
+        descriptor.flags |= Network::FLAG_O_NONBLOCK;
+    }
 
     if (Settings::values.airplane_mode.GetValue() && descriptor.is_connection_based) {
         LOG_ERROR(Service, "Airplane mode is enabled, cannot create socket");
@@ -1748,8 +1766,11 @@ Errno BSD_USA::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<cons
     case OptName::SNDTIMEO:
         return Translate(socket->SetSndTimeo(value));
     case OptName::RCVTIMEO:
-        file_descriptors[fd]->has_receive_timeout = value != 0;
-        return Translate(socket->SetRcvTimeo(value));
+    {
+        const Errno result = Translate(socket->SetRcvTimeo(value));
+        file_descriptors[fd]->has_receive_timeout = result == Errno::SUCCESS && value != 0;
+        return result;
+    }
     case OptName::NOSIGPIPE:
         LOG_WARNING(Service, "(STUBBED) setting NOSIGPIPE to {}", value);
         return Errno::SUCCESS;

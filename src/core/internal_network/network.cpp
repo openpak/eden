@@ -1193,6 +1193,10 @@ Errno Socket::SetRcvBuf(u32 value) {
     return SetSockOpt(fd, SO_RCVBUF, value);
 }
 
+// [OpenPak] Winsock takes SO_SNDTIMEO/SO_RCVTIMEO as a DWORD of milliseconds; everywhere else the
+// option is a timeval, and four raw bytes are rejected by the host, leaving the socket with no
+// timeout at all (as Citron has it).
+#ifdef _WIN32
 Errno Socket::SetSndTimeo(u32 value) {
     return SetSockOpt(fd, SO_SNDTIMEO, value);
 }
@@ -1200,6 +1204,27 @@ Errno Socket::SetSndTimeo(u32 value) {
 Errno Socket::SetRcvTimeo(u32 value) {
     return SetSockOpt(fd, SO_RCVTIMEO, value);
 }
+#else
+namespace {
+Errno SetTimevalSockOpt(SOCKET fd_so, int option, u32 milliseconds) {
+    struct timeval tv {};
+    tv.tv_sec = static_cast<time_t>(milliseconds / 1000);
+    tv.tv_usec = static_cast<suseconds_t>((milliseconds % 1000) * 1000);
+    if (setsockopt(fd_so, SOL_SOCKET, option, &tv, sizeof(tv)) != SOCKET_ERROR) {
+        return Errno::SUCCESS;
+    }
+    return GetAndLogLastError();
+}
+} // namespace
+
+Errno Socket::SetSndTimeo(u32 value) {
+    return SetTimevalSockOpt(fd, SO_SNDTIMEO, value);
+}
+
+Errno Socket::SetRcvTimeo(u32 value) {
+    return SetTimevalSockOpt(fd, SO_RCVTIMEO, value);
+}
+#endif
 
 Errno Socket::SetNonBlock(bool enable) {
     if (EnableNonBlock(fd, enable)) {
