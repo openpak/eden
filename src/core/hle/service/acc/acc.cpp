@@ -21,6 +21,7 @@
 #include "core/core_timing.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
+#include "core/hle/kernel/k_event.h"
 #include "core/hle/service/acc/acc.h"
 #include "core/hle/service/acc/async_context.h"
 #include "core/hle/service/acc/errors.h"
@@ -831,6 +832,73 @@ protected:
     }
 };
 
+// 6.0.0+
+// [OpenPak] Done before anyone asks, and the licence is Subscribed.
+class IAsyncNetworkServiceLicenseKindContext final
+    : public ServiceFramework<IAsyncNetworkServiceLicenseKindContext> {
+public:
+    explicit IAsyncNetworkServiceLicenseKindContext(Core::System& system_)
+        : ServiceFramework{system_, "IAsyncNetworkServiceLicenseKindContext"},
+          service_context{system_, "IAsyncNetworkServiceLicenseKindContext"} {
+        // clang-format off
+        static const FunctionInfo functions[] = {
+            {0, &IAsyncNetworkServiceLicenseKindContext::GetSystemEvent, "GetSystemEvent"},
+            {1, &IAsyncNetworkServiceLicenseKindContext::Cancel, "Cancel"},
+            {2, &IAsyncNetworkServiceLicenseKindContext::HasDone, "HasDone"},
+            {3, &IAsyncNetworkServiceLicenseKindContext::GetResult, "GetResult"},
+            {4, &IAsyncNetworkServiceLicenseKindContext::GetNetworkServiceLicenseKind, "GetNetworkServiceLicenseKind"},
+        };
+        // clang-format on
+
+        RegisterHandlers(functions);
+
+        completion_event =
+            service_context.CreateEvent("IAsyncNetworkServiceLicenseKindContext:CompletionEvent");
+        completion_event->Signal(system.Kernel());
+    }
+
+    ~IAsyncNetworkServiceLicenseKindContext() override {
+        service_context.CloseEvent(completion_event);
+    }
+
+private:
+    void GetSystemEvent(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_ACC, "called");
+        IPC::ResponseBuilder rb{ctx, 2, 1};
+        rb.Push(ResultSuccess);
+        rb.PushCopyObjects(ctx, completion_event->GetReadableEvent());
+    }
+
+    void Cancel(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_ACC, "called");
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void HasDone(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_ACC, "called");
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push(true);
+    }
+
+    void GetResult(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_ACC, "called");
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void GetNetworkServiceLicenseKind(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_ACC, "called");
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(2); // Subscribed
+    }
+
+    KernelHelpers::ServiceContext service_context;
+    Kernel::KEvent* completion_event;
+};
+
 class IManagerForApplication final : public ServiceFramework<IManagerForApplication> {
 public:
     explicit IManagerForApplication(Core::System& system_,
@@ -850,7 +918,7 @@ public:
             {136, &IManagerForApplication::GetNintendoAccountUserResourceCacheForApplication, "GetNintendoAccountUserResourceCache"}, // 19.0.0+
             {150, &IManagerForApplication::CreateAuthorizationRequest, "CreateAuthorizationRequest"},
             {160, &IManagerForApplication::StoreOpenContext, "StoreOpenContext"},
-            {170, nullptr, "LoadNetworkServiceLicenseKindAsync"},
+            {170, &IManagerForApplication::LoadNetworkServiceLicenseKindAsync, "LoadNetworkServiceLicenseKindAsync"},
         };
         // clang-format on
 
@@ -919,7 +987,15 @@ private:
     void GetNintendoAccountUserResourceCacheForApplication(HLERequestContext& ctx) {
         LOG_WARNING(Service_ACC, "(STUBBED) called");
 
+        // [OpenPak] The same account id GetAccountId answers, in the reply and at the head of
+        // the buffer.
+        const u64 nsa_id = OpenPakSignedIn(system, user_id)
+                               ? openpak::client::session::NetworkServiceAccountId()
+                               : 0;
+        const u64 account_id = nsa_id != 0 ? nsa_id : profile_manager->GetLastOpenedUser().Hash();
+
         std::vector<u8> nas_user_base_for_application(0x68);
+        std::memcpy(nas_user_base_for_application.data(), &account_id, sizeof(account_id));
         ctx.WriteBuffer(nas_user_base_for_application);
 
         if (ctx.CanWriteBuffer(1)) {
@@ -929,7 +1005,7 @@ private:
 
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(ResultSuccess);
-        rb.PushRaw<u64>(profile_manager->GetLastOpenedUser().Hash());
+        rb.PushRaw<u64>(account_id);
     }
 
     void CreateAuthorizationRequest(HLERequestContext& ctx) {
@@ -948,29 +1024,17 @@ private:
         rb.Push(ResultSuccess);
     }
 
+    void LoadNetworkServiceLicenseKindAsync(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_ACC, "called");
+
+        IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+        rb.Push(ResultSuccess);
+        rb.PushIpcInterface<IAsyncNetworkServiceLicenseKindContext>(ctx, system);
+    }
+
     std::shared_ptr<EnsureTokenIdCacheAsyncInterface> ensure_token_id{};
     std::shared_ptr<ProfileManager> profile_manager;
     Common::UUID user_id; ///< The user the title asked about; OpenPak speaks for the active one only.
-};
-
-// 6.0.0+
-class IAsyncNetworkServiceLicenseKindContext final
-    : public ServiceFramework<IAsyncNetworkServiceLicenseKindContext> {
-public:
-    explicit IAsyncNetworkServiceLicenseKindContext(Core::System& system_, Common::UUID)
-        : ServiceFramework{system_, "IAsyncNetworkServiceLicenseKindContext"} {
-        // clang-format off
-        static const FunctionInfo functions[] = {
-            {0, nullptr, "GetSystemEvent"},
-            {1, nullptr, "Cancel"},
-            {2, nullptr, "HasDone"},
-            {3, nullptr, "GetResult"},
-            {4, nullptr, "GetNetworkServiceLicenseKind"},
-        };
-        // clang-format on
-
-        RegisterHandlers(functions);
-    }
 };
 
 // 8.0.0+
@@ -1407,6 +1471,64 @@ void Module::Interface::TrySelectUserWithoutInteraction(HLERequestContext& ctx) 
     rb.PushRaw(*current);
 }
 
+void Module::Interface::GetProfileDigest(HLERequestContext& ctx) {
+    LOG_WARNING(Service_ACC, "(STUBBED) called");
+
+    if (ctx.CanWriteBuffer()) {
+        const std::array<u8, 0x20> digest{};
+        ctx.WriteBuffer(digest);
+    }
+
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(ResultSuccess);
+}
+
+void Module::Interface::DebugActivateOpenContextRetention(HLERequestContext& ctx) {
+    LOG_WARNING(Service_ACC, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+    rb.Push(ResultSuccess);
+    rb.PushIpcInterface<ISessionObject>(ctx, system, Common::UUID{});
+}
+
+void Module::Interface::AuthenticateApplicationAsync(HLERequestContext& ctx) {
+    LOG_WARNING(Service_ACC, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+    rb.Push(ResultSuccess);
+    rb.PushIpcInterface<CompletedAsyncContext>(ctx, system);
+}
+
+void Module::Interface::CheckNetworkServiceAvailabilityAsync(HLERequestContext& ctx) {
+    LOG_WARNING(Service_ACC, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+    rb.Push(ResultSuccess);
+    rb.PushIpcInterface<CompletedAsyncContext>(ctx, system);
+}
+
+void Module::Interface::ClearSaveDataThumbnail(HLERequestContext& ctx) {
+    LOG_WARNING(Service_ACC, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(ResultSuccess);
+}
+
+void Module::Interface::CreateGuestLoginRequest(HLERequestContext& ctx) {
+    LOG_WARNING(Service_ACC, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+    rb.Push(ResultSuccess);
+    rb.PushIpcInterface<IGuestLoginRequest>(ctx, system, Common::UUID{});
+}
+
+void Module::Interface::LoadOpenContext(HLERequestContext& ctx) {
+    LOG_WARNING(Service_ACC, "(STUBBED) called");
+
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(ResultSuccess);
+}
+
 Module::Interface::Interface(std::shared_ptr<Module> module_,
                              std::shared_ptr<ProfileManager> profile_manager_,
                              Core::System& system_, const char* name)
@@ -1521,20 +1643,20 @@ public:
             {3, &ACC_U0::ListOpenUsers, "ListOpenUsers"},
             {4, &ACC_U0::GetLastOpenedUser, "GetLastOpenedUser"},
             {5, &ACC_U0::GetProfile, "GetProfile"},
-            {6, nullptr, "GetProfileDigest"}, // 3.0.0+
+            {6, &ACC_U0::GetProfileDigest, "GetProfileDigest"}, // 3.0.0+
             {50, &ACC_U0::IsUserRegistrationRequestPermitted, "IsUserRegistrationRequestPermitted"},
             {51, &ACC_U0::TrySelectUserWithoutInteractionDeprecated, "TrySelectUserWithoutInteractionDeprecated"},
             {52, &ACC_U0::TrySelectUserWithoutInteraction, "TrySelectUserWithoutInteraction"},
             {60, &ACC_U0::ListOpenContextStoredUsers, "ListOpenContextStoredUsers"}, // 5.0.0 - 5.1.0
-            {99, nullptr, "DebugActivateOpenContextRetention"}, // 6.0.0+
+            {99, &ACC_U0::DebugActivateOpenContextRetention, "DebugActivateOpenContextRetention"}, // 6.0.0+
             {100, &ACC_U0::InitializeApplicationInfo, "InitializeApplicationInfo"},
             {101, &ACC_U0::GetBaasAccountManagerForApplication, "GetBaasAccountManagerForApplication"},
-            {102, nullptr, "AuthenticateApplicationAsync"},
-            {103, nullptr, "CheckNetworkServiceAvailabilityAsync"}, // 4.0.0+
+            {102, &ACC_U0::AuthenticateApplicationAsync, "AuthenticateApplicationAsync"},
+            {103, &ACC_U0::CheckNetworkServiceAvailabilityAsync, "CheckNetworkServiceAvailabilityAsync"}, // 4.0.0+
             {110, &ACC_U0::StoreSaveDataThumbnailApplication, "StoreSaveDataThumbnail"},
-            {111, nullptr, "ClearSaveDataThumbnail"},
-            {120, nullptr, "CreateGuestLoginRequest"},
-            {130, nullptr, "LoadOpenContext"}, // 5.0.0+
+            {111, &ACC_U0::ClearSaveDataThumbnail, "ClearSaveDataThumbnail"},
+            {120, &ACC_U0::CreateGuestLoginRequest, "CreateGuestLoginRequest"},
+            {130, &ACC_U0::LoadOpenContext, "LoadOpenContext"}, // 5.0.0+
             {131, &ACC_U0::ListOpenContextStoredUsers, "ListOpenContextStoredUsers"}, // 6.0.0+
             {140, &ACC_U0::InitializeApplicationInfoRestricted, "InitializeApplicationInfoRestricted"}, // 6.0.0+
             {141, &ACC_U0::ListQualifiedUsers, "ListQualifiedUsers"}, // 6.0.0+

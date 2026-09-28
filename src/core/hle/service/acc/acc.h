@@ -49,6 +49,13 @@ public:
         void GetBaasAccountManagerForSystemService(HLERequestContext& ctx);
         void StoreSaveDataThumbnailSystem(HLERequestContext& ctx);
         void GetPinCodeLength(HLERequestContext& ctx);
+        void GetProfileDigest(HLERequestContext& ctx);
+        void DebugActivateOpenContextRetention(HLERequestContext& ctx);
+        void AuthenticateApplicationAsync(HLERequestContext& ctx);
+        void CheckNetworkServiceAvailabilityAsync(HLERequestContext& ctx);
+        void ClearSaveDataThumbnail(HLERequestContext& ctx);
+        void CreateGuestLoginRequest(HLERequestContext& ctx);
+        void LoadOpenContext(HLERequestContext& ctx);
 
     private:
         Result InitializeApplicationInfoBase();
