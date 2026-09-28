@@ -7,6 +7,28 @@
 #include <QDateTime>
 #include "yuzu/applets/qt_error.h"
 #include "yuzu/main_window.h"
+#include "openpak/api.h"
+
+namespace {
+
+// [OpenPak] NEX carries no field for why a login was refused, so every account gate reaches the
+// player as a bare 2306-XXXX. Ask the account server about our own account and say what it
+// actually was.
+QString OpenPakGateHint(Result error) {
+    constexpr u32 NexModule = 306;
+    if (static_cast<u32>(error.GetModule()) != NexModule) {
+        return {};
+    }
+
+    const auto status = WebService::OpenPakApi::GetOnlineStatus();
+    if (!status.queried || status.allow || status.message.empty()) {
+        return {};
+    }
+
+    return QStringLiteral("\n\n%1").arg(QString::fromStdString(status.message));
+}
+
+} // Anonymous namespace
 
 QtErrorDisplay::QtErrorDisplay(MainWindow& parent) {
     connect(this, &QtErrorDisplay::MainWindowDisplayError, &parent,
@@ -31,7 +53,8 @@ void QtErrorDisplay::ShowError(Result error, FinishedCallback finished) const {
             .arg(static_cast<u32>(error.GetModule()) + 2000, 4, 10, QChar::fromLatin1('0'))
             .arg(error.GetDescription(), 4, 10, QChar::fromLatin1('0'))
             .arg(error.raw, 8, 16, QChar::fromLatin1('0')),
-        tr("An error has occurred.\nPlease try again or contact the developer of the software."));
+        tr("An error has occurred.\nPlease try again or contact the developer of the software.") +
+            OpenPakGateHint(error));
 }
 
 void QtErrorDisplay::ShowErrorWithTimestamp(Result error, std::chrono::seconds time,

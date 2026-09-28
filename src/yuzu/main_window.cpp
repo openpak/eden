@@ -22,7 +22,10 @@
 #include "qt_common/discord/discord.h"
 #include "yuzu/openpak_host.h"
 #include "openpak/qt/friend_picker.h"
+#include "openpak/account.h"
+#include "openpak/api.h"
 #include "openpak/compatibility.h"
+#include "openpak/friends_cache.h"
 #include "openpak/qt/strings.h"
 #include <QStandardItemModel>
 #include <QPointer>
@@ -33,6 +36,8 @@
 #include "openpak/platform.h"
 #include "openpak/session.h"
 #include "openpak/qt/account_dialog.h"
+#include "openpak/qt/nzp_online_count.h"
+#include "openpak/qt/online_counts.h"
 #include "qt_common/game_list/game_list_p.h"
 #include "ui_main.h"
 
@@ -81,6 +86,7 @@
 #include <QActionGroup>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFileDialog>
@@ -1055,6 +1061,9 @@ void MainWindow::InitializeWidgets() {
     openpak::qt::Host::SetCurrent(openpak_host);
     // MyPage's "invite friends": the library's picker, driven by mouse, keyboard or controller.
     openpak::qt::InstallFriendPicker(openpak_host, this);
+    // The game list's live player counts.
+    OpenPak::OnlineCounts::Start(this);
+    OpenPak::NzpOnlineCount::Start(this);
     // The OpenPak menu (UX spec §3.1), built by the library the way every emulator has it;
     // OpenPak settings... opens Configure at its OpenPak page. The host owns the window and the
     // toasts (§3.10), so nothing OpenPak goes to the status bar.
@@ -2043,6 +2052,59 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         QtConfig per_game_config(config_file_name, Config::ConfigType::PerGameConfig);
         QtCommon::system->HIDCore().ReloadInputDevices();
         QtCommon::system->ApplySettings();
+
+        // [OpenPak] TEMPORARY: a resolution scale above 1x doubles the online points these titles
+        // report. Clamped to 1x until the scaling bug itself is fixed.
+        switch (title_id) {
+        case 0x0100f8f0000a2000ULL: // Splatoon 2 (EU)
+        case 0x01003bc0000a0000ULL: // Splatoon 2 (US)
+        case 0x01003c700009c800ULL: // Splatoon 2 (JP)
+            LOG_INFO(Frontend, "Applying workaround: clamping resolution to 1x for Splatoon 2 "
+                               "(online points scaling bug)");
+            Settings::values.resolution_setup.SetValue(Settings::ResolutionSetup::Res1X);
+            break;
+        case 0x0100C2500FC20000ULL: // Splatoon 3
+            LOG_INFO(Frontend, "Applying workaround: clamping resolution to 1x for Splatoon 3 "
+                               "(same online points scaling bug as Splatoon 2)");
+            Settings::values.resolution_setup.SetValue(Settings::ResolutionSetup::Res1X);
+            break;
+        default:
+            break;
+        }
+    }
+
+    // [OpenPak] Splatoon 3 does not boot with a mod or a cheat enabled, on the production server:
+    // play there is against real people, and the console itself computes the shots, so the server
+    // cannot contradict a modified client. Updates and DLC are not mods. Checked after the
+    // per-game settings, which hold the list of disabled add-ons. Eden lists a cheat as a mod
+    // whose kind is "Cheats", so the one list covers both.
+    const bool openpak_production_active =
+        Settings::values.enable_openpak.GetValue() &&
+        Settings::values.openpak_server_ip.GetValue() ==
+            Settings::values.openpak_server_ip.GetDefault();
+    if (title_id == 0x0100C2500FC20000ULL && openpak_production_active) {
+        const FileSys::PatchManager pm{title_id, QtCommon::system->GetFileSystemController(),
+                                       QtCommon::system->GetContentProvider()};
+        QStringList active_mods;
+        for (const auto& patch : pm.GetPatches()) {
+            if (!patch.enabled || patch.type != FileSys::PatchType::Mod) {
+                continue;
+            }
+            const QString name = QString::fromStdString(patch.name);
+            active_mods.push_back(patch.version == "Cheats" ? tr("%1 (cheat)").arg(name) : name);
+        }
+        if (!active_mods.isEmpty()) {
+            LOG_CRITICAL(Frontend,
+                         "[OpenPak] Refusing to boot Splatoon 3: {} mod(s)/cheat(s) enabled",
+                         active_mods.size());
+            QMessageBox::critical(
+                this, tr("Splatoon 3: mods must be disabled"),
+                tr("Splatoon 3 cannot be launched while any mod or cheat is enabled:\n\n%1\n\n"
+                   "Disable them in the game's Properties > Add-Ons/Cheats tabs and try again. "
+                   "Updates and DLC are not affected.")
+                    .arg(active_mods.join(QStringLiteral("\n"))));
+            return;
+        }
     }
 
     Settings::LogSettings();
@@ -2168,6 +2230,17 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
                      .toStdString();
     LOG_INFO(Frontend, "Booting game: {:016X} | {} | {}", title_id, title_name, title_version);
     const auto gpu_vendor = QtCommon::system->GPU().Renderer().GetDeviceVendor();
+    // [OpenPak] What the play history says was played.
+    openpak_game_name = title_name;
+    openpak_game_icon_base64.clear();
+    std::vector<u8> icon_bytes;
+    if (QtCommon::system->GetAppLoader().ReadIcon(icon_bytes) == Loader::ResultStatus::Success) {
+        openpak_game_icon_base64 =
+            QByteArray::fromRawData(reinterpret_cast<const char*>(icon_bytes.data()),
+                                    static_cast<int>(icon_bytes.size()))
+                .toBase64()
+                .toStdString();
+    }
     UpdateWindowTitle(title_name, title_version, gpu_vendor);
 
     loading_screen->Prepare(QtCommon::system->GetAppLoader());
@@ -2253,6 +2326,12 @@ void MainWindow::OnEmulationStopTimeExpired() {
 }
 
 void MainWindow::OnEmulationStopped() {
+    // [OpenPak] Every way of stopping lands here: the play time goes to the account's history,
+    // and friends see "online" again rather than "playing".
+    play_time_manager->Stop();
+    SyncOpenPakHistory();
+    Common::OpenPakFriends::SetLocalStatus(Common::OpenPakFriends::PresenceOnline);
+
     shutdown_timer.stop();
     if (QtCommon::emu_thread) {
         QtCommon::emu_thread->disconnect();
@@ -2329,6 +2408,29 @@ void MainWindow::OnEmulationStopped() {
     Settings::RestoreGlobalState(QtCommon::system->IsPoweredOn());
     QtCommon::system->HIDCore().ReloadInputDevices();
     UpdateStatusButtons();
+}
+
+void MainWindow::SyncOpenPakHistory() {
+    const bool linked = Common::OpenPakAccount::IsLinked();
+    const u64 program_id = openpak_title_id;
+    const u64 seconds = play_time_manager->GetPlayTime(program_id);
+
+    LOG_INFO(Frontend, "OpenPak history: linked={} title={:016X} seconds={}", linked, program_id,
+             seconds);
+
+    if (!linked || program_id == 0 || seconds == 0) {
+        return;
+    }
+
+    WebService::OpenPakApi::HistoryEntry entry;
+    entry.title_id = fmt::format("{:016X}", program_id);
+    entry.name = openpak_game_name;
+    entry.seconds = seconds;
+    entry.last_played = QDateTime::currentDateTimeUtc().toString(Qt::ISODate).toStdString();
+    entry.icon_base64 = openpak_game_icon_base64;
+
+    // Detached: shutdown must not block on the network.
+    std::thread{[entry] { WebService::OpenPakApi::SyncHistory({entry}); }}.detach();
 }
 
 void MainWindow::ShutdownGame() {
@@ -3128,6 +3230,8 @@ void MainWindow::OnStartGame() {
     UpdateMenuState();
     OnTasStateChanged();
 
+    // [OpenPak] Friends see "playing".
+    Common::OpenPakFriends::SetLocalStatus(Common::OpenPakFriends::PresenceOnlinePlay);
     play_time_manager->SetProgramId(QtCommon::system->GetApplicationProcessProgramID());
     play_time_manager->Start();
 

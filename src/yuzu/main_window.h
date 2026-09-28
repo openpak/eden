@@ -493,6 +493,10 @@ private:
     MultiplayerState* multiplayer_state = nullptr;
     OpenPakHost* openpak_host = nullptr;
     u64 openpak_title_id = 0; ///< The title whose save goes up when emulation stops.
+    std::string openpak_game_name;        ///< The running title's name, for the play history.
+    std::string openpak_game_icon_base64; ///< And its icon.
+    /// Sends the title's play time to the OpenPak account's history, off the UI thread.
+    void SyncOpenPakHistory();
     bool configure_at_openpak = false; ///< The next Configure opens at its OpenPak page.
 
     GRenderWindow* render_window = nullptr;
