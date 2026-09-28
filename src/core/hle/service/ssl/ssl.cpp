@@ -4,7 +4,9 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <cstdlib>
+#include <cstring>
 #include <string_view>
 
 #include "common/hex_util.h"
@@ -110,38 +112,38 @@ public:
             {1, &ISslConnection::SetHostName, "SetHostName"},
             {2, &ISslConnection::SetVerifyOption, "SetVerifyOption"},
             {3, &ISslConnection::SetIoMode, "SetIoMode"},
-            {4, nullptr, "GetSocketDescriptor"},
-            {5, nullptr, "GetHostName"},
-            {6, nullptr, "GetVerifyOption"},
-            {7, nullptr, "GetIoMode"},
+            {4, &ISslConnection::GetSocketDescriptor, "GetSocketDescriptor"},
+            {5, &ISslConnection::GetHostName, "GetHostName"},
+            {6, &ISslConnection::GetVerifyOption, "GetVerifyOption"},
+            {7, &ISslConnection::GetIoMode, "GetIoMode"},
             {8, &ISslConnection::DoHandshake, "DoHandshake"},
             {9, &ISslConnection::DoHandshakeGetServerCert, "DoHandshakeGetServerCert"},
             {10, &ISslConnection::Read, "Read"},
             {11, &ISslConnection::Write, "Write"},
             {12, &ISslConnection::Pending, "Pending"},
             {13, &ISslConnection::Peek, "Peek"},
-            {14, nullptr, "Poll"},
-            {15, nullptr, "GetVerifyCertError"},
-            {16, nullptr, "GetNeededServerCertBufferSize"},
+            {14, &ISslConnection::Poll, "Poll"},
+            {15, &ISslConnection::GetVerifyCertError, "GetVerifyCertError"},
+            {16, &ISslConnection::GetNeededServerCertBufferSize, "GetNeededServerCertBufferSize"},
             {17, &ISslConnection::SetSessionCacheMode, "SetSessionCacheMode"},
-            {18, nullptr, "GetSessionCacheMode"},
-            {19, nullptr, "FlushSessionCache"},
-            {20, nullptr, "SetRenegotiationMode"},
-            {21, nullptr, "GetRenegotiationMode"},
+            {18, &ISslConnection::GetSessionCacheMode, "GetSessionCacheMode"},
+            {19, &ISslConnection::FlushSessionCache, "FlushSessionCache"},
+            {20, &ISslConnection::SetRenegotiationMode, "SetRenegotiationMode"},
+            {21, &ISslConnection::GetRenegotiationMode, "GetRenegotiationMode"},
             {22, &ISslConnection::SetOption, "SetOption"},
             {23, &ISslConnection::GetOption, "GetOption"},
-            {24, nullptr, "GetVerifyCertErrors"},
-            {25, nullptr, "GetCipherInfo"},
+            {24, &ISslConnection::GetVerifyCertErrors, "GetVerifyCertErrors"},
+            {25, &ISslConnection::GetCipherInfo, "GetCipherInfo"},
             {26, &ISslConnection::SetNextAlpnProto, "SetNextAlpnProto"},
             {27, &ISslConnection::GetNextAlpnProto, "GetNextAlpnProto"},
-            {28, nullptr, "SetDtlsSocketDescriptor"},
-            {29, nullptr, "GetDtlsHandshakeTimeout"},
-            {30, nullptr, "SetPrivateOption"},
-            {31, nullptr, "SetSrtpCiphers"},
-            {32, nullptr, "GetSrtpCipher"},
-            {33, nullptr, "ExportKeyingMaterial"},
-            {34, nullptr, "SetIoTimeout"},
-            {35, nullptr, "GetIoTimeout"},
+            {28, &ISslConnection::SetDtlsSocketDescriptor, "SetDtlsSocketDescriptor"},
+            {29, &ISslConnection::GetDtlsHandshakeTimeout, "GetDtlsHandshakeTimeout"},
+            {30, &ISslConnection::SetPrivateOption, "SetPrivateOption"},
+            {31, &ISslConnection::SetSrtpCiphers, "SetSrtpCiphers"},
+            {32, &ISslConnection::GetSrtpCipher, "GetSrtpCipher"},
+            {33, &ISslConnection::ExportKeyingMaterial, "ExportKeyingMaterial"},
+            {34, &ISslConnection::SetIoTimeout, "SetIoTimeout"},
+            {35, &ISslConnection::GetIoTimeout, "GetIoTimeout"},
         };
         // clang-format on
 
@@ -156,18 +158,13 @@ public:
 
     ~ISslConnection() {
         shared_data->connection_count--;
-        if (fd_to_close.has_value()) {
-            const s32 fd = *fd_to_close;
-            if (!do_not_close_socket) {
-                LOG_ERROR(Service_SSL,
-                          "do_not_close_socket was changed after setting socket; is this right?");
-            } else {
-                auto bsd = system.ServiceManager().GetService<Service::Sockets::BSD_USA>("bsd:u");
-                if (bsd) {
-                    auto err = bsd->CloseImpl(fd);
-                    if (err != Service::Sockets::Errno::SUCCESS) {
-                        LOG_ERROR(Service_SSL, "Failed to close duplicated socket: {}", err);
-                    }
+        // [OpenPak] The duplicate goes with the connection, unless the title set DoNotCloseSocket.
+        if (fd_to_close.has_value() && !do_not_close_socket) {
+            auto bsd = system.ServiceManager().GetService<Service::Sockets::BSD_USA>("bsd:u");
+            if (bsd) {
+                auto err = bsd->CloseImpl(*fd_to_close);
+                if (err != Service::Sockets::Errno::SUCCESS) {
+                    LOG_ERROR(Service_SSL, "Failed to close duplicated socket: {}", err);
                 }
             }
         }
@@ -195,26 +192,12 @@ private:
         auto bsd = system.ServiceManager().GetService<Service::Sockets::BSD_USA>("bsd:u");
         ASSERT_OR_EXECUTE(bsd, { return ResultInternalError; });
 
-        // [OpenPak] DoNotCloseSocket: the title keeps its descriptor, polls it through bsd and may
-        // dial again on it, and is told so with -1. No duplicate is made for it: a second
-        // descriptor nobody closes is a slot lost for every connection a session makes, and
-        // closing one would close the socket the title still holds, since both share it.
-        if (do_not_close_socket) {
-            std::optional<std::shared_ptr<Network::SocketBase>> sock = bsd->GetSocket(fd);
-            if (!sock.has_value()) {
-                LOG_ERROR(Service_SSL, "invalid socket fd {}", fd);
-                return ResultInvalidSocket;
-            }
-            *out_fd = -1;
-            socket = std::move(*sock);
-            backend->SetSocket(socket);
-            return ResultSuccess;
-        }
-
+        // [OpenPak] The connection works on its own duplicate. The title gets its descriptor
+        // back, or -1 when it set DoNotCloseSocket.
         auto const res_v = bsd->DuplicateSocketImpl(fd);
         if (auto *res = std::get_if<s32>(&res_v)) {
             const s32 duplicated_fd = *res;
-            *out_fd = -1;
+            *out_fd = do_not_close_socket ? -1 : fd;
             fd_to_close = duplicated_fd;
             std::optional<std::shared_ptr<Network::SocketBase>> sock = bsd->GetSocket(duplicated_fd);
             if (!sock.has_value()) {
@@ -238,11 +221,9 @@ private:
 
     Result SetVerifyOptionImpl(u32 option) {
         ASSERT(!did_handshake);
-        // [OpenPak] With OpenPak on, what the title asks for is what it gets: every redirected
-        // name answers with a chain to the OpenPak CA, which the backend trusts, so there is
-        // nothing left to excuse. Without it the option stays forced off, as upstream has it.
-        verify_option = Settings::values.enable_openpak.GetValue() ? option : 0;
-        LOG_DEBUG(Service_SSL, "called. option={} (using {})", option, verify_option);
+        // [OpenPak] What the title asks for is what it gets, with OpenPak on or off.
+        verify_option = option;
+        LOG_DEBUG(Service_SSL, "called. option={}", option);
         backend->SetVerifyOption(verify_option);
         return ResultSuccess;
     }
@@ -599,6 +580,208 @@ private:
         rb.Push(ResultSuccess);
         rb.Push<u32>(static_cast<u32>(to_write));
     }
+
+    void GetSocketDescriptor(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<s32>(-1); // Stub: return invalid socket descriptor
+    }
+
+    void GetHostName(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        // Write empty hostname to buffer
+        ctx.WriteBuffer(std::string_view{});
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void GetVerifyOption(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_SSL, "called, returning verify_option={}", verify_option);
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(verify_option);
+    }
+
+    void GetIoMode(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(static_cast<u32>(IoMode::Blocking)); // Default to blocking
+    }
+
+    void Poll(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const u32 poll_event = rp.Pop<u32>();
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called, poll_event={}", poll_event);
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<s32>(0); // Stub: no events ready
+    }
+
+    void GetVerifyCertError(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(0); // Stub: no certificate errors
+    }
+
+    void GetNeededServerCertBufferSize(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(0x1000); // Stub: 4KB buffer size
+    }
+
+    void GetSessionCacheMode(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(0); // Stub: default session cache mode
+    }
+
+    void FlushSessionCache(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void SetRenegotiationMode(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const u32 mode = rp.Pop<u32>();
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called, mode={}", mode);
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void GetRenegotiationMode(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(0); // Stub: default renegotiation mode
+    }
+
+    void GetVerifyCertErrors(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        // Write empty error array to buffer
+        ctx.WriteBuffer(std::span<const u8>{});
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(0); // Stub: no certificate errors
+    }
+
+    void GetCipherInfo(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        // CipherInfo structure is 0x48 bytes
+        struct CipherInfo {
+            std::array<char, 0x40> cipher_name;
+            std::array<char, 0x8> protocol_version;
+        };
+
+        CipherInfo cipher_info{};
+        std::strcpy(cipher_info.cipher_name.data(), "TLS_RSA_WITH_AES_128_CBC_SHA");
+        std::strcpy(cipher_info.protocol_version.data(), "TLSv1.2");
+
+        ctx.WriteBuffer(cipher_info);
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void SetDtlsSocketDescriptor(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const s32 fd = rp.Pop<s32>();
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called, fd={}", fd);
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void GetDtlsHandshakeTimeout(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(10000); // Stub: 10 second timeout in milliseconds
+    }
+
+    void SetPrivateOption(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const u32 option = rp.Pop<u32>();
+        const s32 value = rp.Pop<s32>();
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called, option={}, value={}", option, value);
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void SetSrtpCiphers(HLERequestContext& ctx) {
+        const auto cipher_data = ctx.ReadBuffer();
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called, cipher_data_size={}", cipher_data.size());
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void GetSrtpCipher(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        // Write empty cipher to buffer
+        ctx.WriteBuffer(std::span<const u8>{});
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(0); // Stub: no cipher selected
+    }
+
+    void ExportKeyingMaterial(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        // Write stub keying material to buffer
+        const std::vector<u8> stub_material(ctx.GetWriteBufferSize(), 0);
+        ctx.WriteBuffer(stub_material);
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void SetIoTimeout(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const u32 timeout_ms = rp.Pop<u32>();
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called, timeout_ms={}", timeout_ms);
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void GetIoTimeout(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(30000); // Stub: 30 second timeout in milliseconds
+    }
 };
 
 class ISslContext final : public ServiceFramework<ISslContext> {
@@ -613,14 +796,14 @@ public:
             {3, &ISslContext::GetConnectionCount, "GetConnectionCount"},
             {4, &ISslContext::ImportServerPki, "ImportServerPki"},
             {5, &ISslContext::ImportClientPki, "ImportClientPki"},
-            {6, nullptr, "RemoveServerPki"},
-            {7, nullptr, "RemoveClientPki"},
-            {8, nullptr, "RegisterInternalPki"},
-            {9, nullptr, "AddPolicyOid"},
-            {10, nullptr, "ImportCrl"},
-            {11, nullptr, "RemoveCrl"},
-            {12, nullptr, "ImportClientCertKeyPki"},
-            {13, nullptr, "GeneratePrivateKeyAndCert"},
+            {6, &ISslContext::RemoveServerPki, "RemoveServerPki"},
+            {7, &ISslContext::RemoveClientPki, "RemoveClientPki"},
+            {8, &ISslContext::RegisterInternalPki, "RegisterInternalPki"},
+            {9, &ISslContext::AddPolicyOid, "AddPolicyOid"},
+            {10, &ISslContext::ImportCrl, "ImportCrl"},
+            {11, &ISslContext::RemoveCrl, "RemoveCrl"},
+            {12, &ISslContext::ImportClientCertKeyPki, "ImportClientCertKeyPki"},
+            {13, &ISslContext::GeneratePrivateKeyAndCert, "GeneratePrivateKeyAndCert"},
         };
         RegisterHandlers(functions);
     }
@@ -710,6 +893,268 @@ private:
         rb.Push(ResultSuccess);
         rb.Push(client_id);
     }
+
+    void RemoveServerPki(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const u64 server_id = rp.Pop<u64>();
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called, server_id={}", server_id);
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void RemoveClientPki(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const u64 client_id = rp.Pop<u64>();
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called, client_id={}", client_id);
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void RegisterInternalPki(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const u32 internal_pki = rp.Pop<u32>();
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called, internal_pki={}", internal_pki);
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void AddPolicyOid(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void ImportCrl(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void RemoveCrl(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void ImportClientCertKeyPki(HLERequestContext& ctx) {
+        constexpr u64 client_id = 0;
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(ResultSuccess);
+        rb.Push(client_id);
+    }
+
+    void GeneratePrivateKeyAndCert(HLERequestContext& ctx) {
+        constexpr u64 client_id = 0;
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(ResultSuccess);
+        rb.Push(client_id);
+    }
+};
+
+class ISslContextForSystem final : public ServiceFramework<ISslContextForSystem> {
+public:
+    explicit ISslContextForSystem(Core::System& system_, SslVersion version)
+        : ServiceFramework{system_, "ISslContextForSystem"}, ssl_version{version},
+          shared_data{std::make_shared<SslContextSharedData>()} {
+        // clang-format off
+        static const FunctionInfo functions[] = {
+            {0, &ISslContextForSystem::SetOption, "SetOption"},
+            {1, &ISslContextForSystem::GetOption, "GetOption"},
+            {2, &ISslContextForSystem::CreateConnection, "CreateConnection"},
+            {3, &ISslContextForSystem::GetConnectionCount, "GetConnectionCount"},
+            {4, &ISslContextForSystem::ImportServerPki, "ImportServerPki"},
+            {5, &ISslContextForSystem::ImportClientPki, "ImportClientPki"},
+            {6, &ISslContextForSystem::RemoveServerPki, "RemoveServerPki"},
+            {7, &ISslContextForSystem::RemoveClientPki, "RemoveClientPki"},
+            {8, &ISslContextForSystem::RegisterInternalPki, "RegisterInternalPki"},
+            {9, &ISslContextForSystem::AddPolicyOid, "AddPolicyOid"},
+            {10, &ISslContextForSystem::ImportCrl, "ImportCrl"},
+            {11, &ISslContextForSystem::RemoveCrl, "RemoveCrl"},
+            {12, &ISslContextForSystem::ImportClientCertKeyPki, "ImportClientCertKeyPki"},
+            {13, &ISslContextForSystem::GeneratePrivateKeyAndCert, "GeneratePrivateKeyAndCert"},
+            {14, &ISslContextForSystem::CreateConnectionEx, "CreateConnectionEx"},
+        };
+        // clang-format on
+
+        RegisterHandlers(functions);
+    }
+
+private:
+    SslVersion ssl_version;
+    std::shared_ptr<SslContextSharedData> shared_data;
+
+    void SetOption(HLERequestContext& ctx) {
+        struct Parameters {
+            ContextOption option;
+            s32 value;
+        };
+        static_assert(sizeof(Parameters) == 0x8, "Parameters is an invalid size");
+
+        IPC::RequestParser rp{ctx};
+        const auto parameters = rp.PopRaw<Parameters>();
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called. option={}, value={}", parameters.option,
+                    parameters.value);
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void GetOption(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const auto option = rp.PopEnum<ContextOption>();
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called. option={}", option);
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<s32>(0); // Stubbed value
+    }
+
+    void CreateConnection(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        std::unique_ptr<SSLConnectionBackend> backend;
+        const Result res = CreateSSLConnectionBackend(&backend);
+
+        IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+        rb.Push(res);
+        if (res == ResultSuccess) {
+            rb.PushIpcInterface<ISslConnection>(ctx, system, ssl_version, shared_data,
+                                                std::move(backend));
+        }
+    }
+
+    void GetConnectionCount(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_SSL, "connection_count={}", shared_data->connection_count);
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push(shared_data->connection_count);
+    }
+
+    void ImportServerPki(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const auto certificate_format = rp.PopEnum<CertificateFormat>();
+
+        constexpr u64 server_id = 0;
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called, certificate_format={}", certificate_format);
+
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(ResultSuccess);
+        rb.Push(server_id);
+    }
+
+    void ImportClientPki(HLERequestContext& ctx) {
+        constexpr u64 client_id = 0;
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(ResultSuccess);
+        rb.Push(client_id);
+    }
+
+    void RemoveServerPki(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const u64 server_id = rp.Pop<u64>();
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called, server_id={}", server_id);
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void RemoveClientPki(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const u64 client_id = rp.Pop<u64>();
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called, client_id={}", client_id);
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void RegisterInternalPki(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const u32 internal_pki = rp.Pop<u32>();
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called, internal_pki={}", internal_pki);
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void AddPolicyOid(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void ImportCrl(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void RemoveCrl(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void ImportClientCertKeyPki(HLERequestContext& ctx) {
+        constexpr u64 client_id = 0;
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(ResultSuccess);
+        rb.Push(client_id);
+    }
+
+    void GeneratePrivateKeyAndCert(HLERequestContext& ctx) {
+        constexpr u64 client_id = 0;
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(ResultSuccess);
+        rb.Push(client_id);
+    }
+
+    void CreateConnectionEx(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        std::unique_ptr<SSLConnectionBackend> backend;
+        const Result res = CreateSSLConnectionBackend(&backend);
+
+        IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+        rb.Push(res);
+        if (res == ResultSuccess) {
+            rb.PushIpcInterface<ISslConnection>(ctx, system, ssl_version, shared_data,
+                                                std::move(backend));
+        }
+    }
 };
 
 class ISslService final : public ServiceFramework<ISslService> {
@@ -719,15 +1164,15 @@ public:
         // clang-format off
         static const FunctionInfo functions[] = {
             {0, &ISslService::CreateContext, "CreateContext"},
-            {1, nullptr, "GetContextCount"},
+            {1, &ISslService::GetContextCount, "GetContextCount"},
             {2, D<&ISslService::GetCertificates>, "GetCertificates"},
             {3, D<&ISslService::GetCertificateBufSize>, "GetCertificateBufSize"},
             {4, nullptr, "DebugIoctl"},
             {5, &ISslService::SetInterfaceVersion, "SetInterfaceVersion"},
-            {6, nullptr, "FlushSessionCache"},
-            {7, nullptr, "SetDebugOption"},
-            {8, nullptr, "GetDebugOption"},
-            {8, nullptr, "ClearTls12FallbackFlag"},
+            {6, &ISslService::FlushSessionCache, "FlushSessionCache"},
+            {7, &ISslService::SetDebugOption, "SetDebugOption"},
+            {8, &ISslService::GetDebugOption, "GetDebugOption"},
+            {9, &ISslService::ClearTls12FallbackFlag, "ClearTls12FallbackFlag"},
         };
         // clang-format on
 
@@ -776,6 +1221,63 @@ private:
         R_RETURN(cert_store.GetCertificates(out_num_entries, out_buffer, certificate_ids));
     }
 
+    void FlushSessionCache(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::RequestParser rp{ctx};
+        const u32 option_type = rp.Pop<u32>();
+
+        // Read the hostname buffer if provided for option_type 0
+        if (option_type == 0 && ctx.CanReadBuffer(0)) {
+            const auto hostname = Common::StringFromBuffer(ctx.ReadBuffer(0));
+            LOG_INFO(Service_SSL, "FlushSessionCache with hostname={}", hostname);
+        }
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(0); // Flushed session count, stubbed to 0
+    }
+
+    void GetContextCount(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        // Return stub count of 0 active contexts
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(0);
+    }
+
+    void SetDebugOption(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const u32 debug_option_type = rp.Pop<u32>();
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called, debug_option_type={}", debug_option_type);
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void GetDebugOption(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const u32 debug_option_type = rp.Pop<u32>();
+
+        LOG_WARNING(Service_SSL, "(STUBBED) called, debug_option_type={}", debug_option_type);
+
+        // Write stub debug option value to buffer
+        std::array<u8, 1> debug_value{0};
+        ctx.WriteBuffer(debug_value);
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void ClearTls12FallbackFlag(HLERequestContext& ctx) {
+        LOG_WARNING(Service_SSL, "(STUBBED) called");
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
 private:
     CertStore cert_store;
 };
@@ -786,7 +1288,7 @@ class ISslServiceForSystem final : public ServiceFramework<ISslServiceForSystem>
             : ServiceFramework{system_, "ssl:s"}, cert_store{system} {
             // clang-format off
             static const FunctionInfo functions[] = {
-                {0, D<&ISslServiceForSystem::CreateContext>, "CreateContext"},
+                {0, &ISslServiceForSystem::CreateContext, "CreateContext"},
                 {1, D<&ISslServiceForSystem::GetContextCount>, "GetContextCount"},
                 {2, D<&ISslServiceForSystem::GetCertificates>, "GetCertificates"},
                 {3, D<&ISslServiceForSystem::GetCertificateBufSize>, "GetCertificateBufSize"},
@@ -796,7 +1298,7 @@ class ISslServiceForSystem final : public ServiceFramework<ISslServiceForSystem>
                 {7, D<&ISslServiceForSystem::SetDebugOption>, "SetDebugOption"},
                 {8, D<&ISslServiceForSystem::GetDebugOption>, "GetDebugOption"},
                 {9, D<&ISslServiceForSystem::ClearTls12FallbackFlag>, "ClearTls12FallbackFlag"},
-                {100, D<&ISslServiceForSystem::CreateContextForSystem>, "CreateContextForSystem"},
+                {100, &ISslServiceForSystem::CreateContextForSystem, "CreateContextForSystem"},
                 {101, D<&ISslServiceForSystem::SetThreadCoreMask>, "SetThreadCoreMask"},
                 {102, D<&ISslServiceForSystem::GetThreadCoreMask>, "GetThreadCoreMask"},
                 {103, D<&ISslServiceForSystem::VerifySignature>, "VerifySignature"}
@@ -806,12 +1308,25 @@ class ISslServiceForSystem final : public ServiceFramework<ISslServiceForSystem>
             RegisterHandlers(functions);
         };
 
-        Result CreateContext() {
-            LOG_DEBUG(Service_SSL, "(STUBBED) called.");
+        // [OpenPak] A title that opens its context through ssl:s gets the same ISslContext
+        // plain ssl hands out.
+        void CreateContext(HLERequestContext& ctx) {
+            struct Parameters {
+                SslVersion ssl_version;
+                INSERT_PADDING_BYTES(0x4);
+                u64 pid_placeholder;
+            };
+            static_assert(sizeof(Parameters) == 0x10, "Parameters is an invalid size");
 
-            // TODO (jarrodnorwell)
+            IPC::RequestParser rp{ctx};
+            const auto parameters = rp.PopRaw<Parameters>();
 
-            return ResultSuccess;
+            LOG_WARNING(Service_SSL, "(STUBBED) called, api_version={}, pid_placeholder={}",
+                        parameters.ssl_version.api_version, parameters.pid_placeholder);
+
+            IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+            rb.Push(ResultSuccess);
+            rb.PushIpcInterface<ISslContext>(ctx, system, parameters.ssl_version);
         };
 
         Result GetContextCount() {
@@ -882,12 +1397,23 @@ class ISslServiceForSystem final : public ServiceFramework<ISslServiceForSystem>
             return ResultSuccess;
         };
 
-        Result CreateContextForSystem() {
-            LOG_DEBUG(Service_SSL, "(STUBBED) called.");
+        void CreateContextForSystem(HLERequestContext& ctx) {
+            struct Parameters {
+                SslVersion ssl_version;
+                INSERT_PADDING_BYTES(0x4);
+                u64 pid_placeholder;
+            };
+            static_assert(sizeof(Parameters) == 0x10, "Parameters is an invalid size");
 
-            // TODO (jarrodnorwell)
+            IPC::RequestParser rp{ctx};
+            const auto parameters = rp.PopRaw<Parameters>();
 
-            return ResultSuccess;
+            LOG_WARNING(Service_SSL, "(STUBBED) called, api_version={}, pid_placeholder={}",
+                        parameters.ssl_version.api_version, parameters.pid_placeholder);
+
+            IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+            rb.Push(ResultSuccess);
+            rb.PushIpcInterface<ISslContextForSystem>(ctx, system, parameters.ssl_version);
         };
 
         Result SetThreadCoreMask() {
