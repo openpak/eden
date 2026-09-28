@@ -18,7 +18,8 @@ IParentalControlService::IParentalControlService(Core::System& system_, Capabili
     : ServiceFramework{system_, "IParentalControlService"}, capability{capability_},
       program_id{program_id_},
       service_context{system_, "IParentalControlService"}, synchronization_event{service_context},
-      unlinked_event{service_context}, request_suspension_event{service_context} {
+      unlinked_event{service_context}, request_suspension_event{service_context},
+      extended_play_timer_event{service_context} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {1, D<&IParentalControlService::Initialize>, "Initialize"},
@@ -98,7 +99,7 @@ IParentalControlService::IParentalControlService(Core::System& system_, Capabili
         {1472, nullptr, "CancelNetworkRequest"},
         {1473, D<&IParentalControlService::GetUnlinkedEvent>, "GetUnlinkedEvent"},
         {1474, nullptr, "ClearUnlinkedEvent"},
-        {1475, nullptr, "GetExtendedPlayTimerEvent"}, // 18.0.0+
+        {1475, D<&IParentalControlService::GetExtendedPlayTimerEvent>, "GetExtendedPlayTimerEvent"}, // 18.0.0+
         {1601, nullptr, "DisableAllFeatures"},
         {1602, nullptr, "PostEnableAllFeatures"},
         {1603, nullptr, "IsAllFeaturesDisabled"},
@@ -448,6 +449,13 @@ Result IParentalControlService::GetPlayTimerRemainingTimeDisplayInfo(/* Out 0x18
 Result IParentalControlService::GetUnlinkedEvent(OutCopyHandle<Kernel::KReadableEvent> out_event) {
     LOG_INFO(Service_PCTL, "called");
     *out_event = unlinked_event.GetHandle();
+    R_SUCCEED();
+}
+
+Result IParentalControlService::GetExtendedPlayTimerEvent(
+    OutCopyHandle<Kernel::KReadableEvent> out_event) {
+    LOG_INFO(Service_PCTL, "called");
+    *out_event = extended_play_timer_event.GetHandle();
     R_SUCCEED();
 }
 

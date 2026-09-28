@@ -57,6 +57,7 @@ private:
     Result IsPlayTimerAlarmDisabled(Out<bool> out_play_timer_alarm_disabled);
     Result GetPlayTimerRemainingTimeDisplayInfo();
     Result GetUnlinkedEvent(OutCopyHandle<Kernel::KReadableEvent> out_event);
+    Result GetExtendedPlayTimerEvent(OutCopyHandle<Kernel::KReadableEvent> out_event);
     Result GetStereoVisionRestriction(Out<bool> out_stereo_vision_restriction);
     Result SetStereoVisionRestriction(bool stereo_vision_restriction);
     Result ResetConfirmedStereoVisionPermission();
@@ -93,6 +94,7 @@ private:
     Event synchronization_event;
     Event unlinked_event;
     Event request_suspension_event;
+    Event extended_play_timer_event;
 };
 
 } // namespace Service::PCTL
