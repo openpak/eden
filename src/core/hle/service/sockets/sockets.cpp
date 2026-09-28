@@ -90,7 +90,10 @@ void LoopProcess(Core::System& system) {
     Kernel::KEvent* deferral_event{};
     server_manager->ManageDeferral(&deferral_event);
     SetBsdDeferralEvent(deferral_event);
-    server_manager->StartDeferralPolling(std::chrono::milliseconds{10});
+    // 1 ms, as Ryujinx's server loop and Citron have it: at a longer interval every round trip
+    // that waits on a deferred poll or recv is rounded up to the interval (measured on Ryujinx at
+    // 50 ms: 10,043 of 10,587 round trips landed in the 50-54 ms bracket against ~6 ms of network).
+    server_manager->StartDeferralPolling(std::chrono::milliseconds{1});
 
     ServerManager::RunServer(std::move(server_manager));
 }
