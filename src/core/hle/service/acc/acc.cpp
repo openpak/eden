@@ -812,14 +812,6 @@ public:
     }
     ~EnsureTokenIdCacheAsyncInterface() = default;
 
-    void LoadIdTokenCache(HLERequestContext& ctx) {
-        LOG_WARNING(Service_ACC, "(STUBBED) called");
-
-        IPC::ResponseBuilder rb{ctx, 3};
-        rb.Push(ResultSuccess);
-        rb.Push(0);
-    }
-
 protected:
     bool IsComplete() const override {
         return true;
